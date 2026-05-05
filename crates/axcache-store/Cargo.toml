@@ -1,0 +1,13 @@
+[package]
+name = "axcache-store"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Store engine untuk AxCache."
+
+[dependencies]
+axcache-axhash = { path = "../axcache-axhash" }
+axcache-alloc = { path = "../axcache-alloc" }
+axcache-evict = { path = "../axcache-evict" }

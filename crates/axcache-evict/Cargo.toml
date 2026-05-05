@@ -1,0 +1,12 @@
+[package]
+name = "axcache-evict"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Eviction engine untuk AxCache."
+
+[dependencies]
+# Di ekosistem nyata, kita mungkin menggunakan implementasi queue tanpa lock
+# Namun untuk pondasi, kita menggunakan std::collections standar terlebih dahulu

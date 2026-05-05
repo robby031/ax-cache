@@ -1,0 +1,11 @@
+[package]
+name = "axcache-io"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "I/O engine untuk AxCache."
+
+[dependencies]
+monoio.workspace = true
