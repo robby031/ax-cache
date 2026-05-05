@@ -6,11 +6,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Ring Buffer SPSC (Single-Producer Single-Consumer) yang Wait-Free.
 /// Menjamin latensi O(1) konstan tanpa Mutex atau Spinlock.
+
+#[repr(align(64))]
+struct CachePadded<T>(T);
+
 pub struct WaitFreeSpscQueue<T> {
     buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
     capacity: usize,
-    head: AtomicUsize,
-    tail: AtomicUsize,
+    head: CachePadded<AtomicUsize>,
+    tail: CachePadded<AtomicUsize>,
 }
 
 unsafe impl<T: Send> Sync for WaitFreeSpscQueue<T> {}
@@ -25,17 +29,17 @@ impl<T> WaitFreeSpscQueue<T> {
         Self {
             buffer: buffer.into_boxed_slice(),
             capacity,
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
+            head: CachePadded(AtomicUsize::new(0)),
+            tail: CachePadded(AtomicUsize::new(0)),
         }
     }
 
     /// Push oleh Producer (Tidak pernah memblokir thread)
     pub fn push(&self, value: T) -> Result<(), T> {
-        let head = self.head.load(Ordering::Relaxed);
-        let next_head = (head + 1) % self.capacity;
+        let head = self.head.0.load(Ordering::Relaxed);
+        let next_head = (head + 1) & (self.capacity - 1);
 
-        if next_head == self.tail.load(Ordering::Acquire) {
+        if next_head == self.tail.0.load(Ordering::Acquire) {
             return Err(value); // Antrian Penuh
         }
 
@@ -43,22 +47,23 @@ impl<T> WaitFreeSpscQueue<T> {
             (*self.buffer[head].get()).write(value);
         }
 
-        self.head.store(next_head, Ordering::Release);
+        self.head.0.store(next_head, Ordering::Release);
         Ok(())
     }
 
     /// Pop oleh Consumer
     pub fn pop(&self) -> Option<T> {
-        let tail = self.tail.load(Ordering::Relaxed);
+        let tail = self.tail.0.load(Ordering::Relaxed);
 
-        if tail == self.head.load(Ordering::Acquire) {
+        if tail == self.head.0.load(Ordering::Acquire) {
             return None; // Antrian Kosong
         }
 
         let value = unsafe { (*self.buffer[tail].get()).assume_init_read() };
 
         self.tail
-            .store((tail + 1) % self.capacity, Ordering::Release);
+            .0
+            .store((tail + 1) & (self.capacity - 1), Ordering::Release);
         Some(value)
     }
 }

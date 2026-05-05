@@ -1,155 +1,334 @@
 // crates/axcache-store/src/dashtable.rs
+//
+// DashTable: SwissTable-inspired hash map dengan SIMD fingerprint scanning.
+//
+// Desain:
+//   • Setiap "grup" = 16 slot; metadata (fingerprint) dipisah dari data (entries)
+//     untuk memaksimalkan cache locality saat scanning.
+//   • H1 (bit atas hash) → indeks grup awal.
+//   • H2 (bit bawah hash) → fingerprint 1 byte per slot.
+//   • Probing: linear di level grup (H1, H1+1, ...) dengan wrap-around.
+//   • Tombstone: DELETED=0x01 memungkinkan delete tanpa rehash.
+//   • Terminasi probing: berhenti saat grup SEPENUHNYA EMPTY (all_empty).
+//   • Resize: jika (live + tombstone) / total_slots > 7/8 → double capacity.
 
-use crate::simd_scan::match_fingerprint;
+use crate::simd_scan::{
+    DELETED, EMPTY, all_empty, find_available, make_fingerprint, match_fingerprint,
+};
 use axcache_axhash::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
 
-/// Kapasitas standar satu grup (bucket) yang dioptimalkan untuk SIMD 128-bit
 const GROUP_SIZE: usize = 16;
-const EMPTY_FINGERPRINT: u8 = 0x00;
 
-/// Struktur metadata terpisah untuk cache locality yang maksimal
-#[derive(Clone, Copy)]
-pub struct GroupMetadata {
-    // Array 16 byte menyimpan 1 byte (fingerprint) dari setiap kunci di grup ini.
-    // Memungkinkan pemindaian SIMD O(1) yang super cepat.
-    fingerprints: [u8; GROUP_SIZE],
+/// Metadata satu grup: 16 byte fingerprint, muat dalam satu register SIMD 128-bit.
+#[derive(Clone)]
+struct GroupMeta {
+    fps: [u8; GROUP_SIZE],
 }
 
-impl GroupMetadata {
-    pub fn new() -> Self {
+impl GroupMeta {
+    #[inline]
+    fn new() -> Self {
         Self {
-            fingerprints: [EMPTY_FINGERPRINT; GROUP_SIZE],
+            fps: [EMPTY; GROUP_SIZE],
         }
     }
 }
 
-/// Implementasi inti Dashtable
 pub struct DashTable<K, V> {
-    metadata: Vec<GroupMetadata>,
-    // Data riil (Key, Value) idealnya akan diatur menggunakan axcache-alloc (Slab).
-    // Untuk representasi pondasi awal, kita gunakan alokasi sekuensial.
+    meta: Vec<GroupMeta>,
     entries: Vec<Option<(K, V)>>,
     hasher: RandomState,
-    capacity_mask: usize,
+    /// Jumlah grup - 1 (selalu 2^n - 1 untuk masking cepat)
+    group_mask: usize,
+    /// Entry yang hidup
+    occupied: usize,
+    /// Tombstone (DELETED)
+    tombstones: usize,
 }
 
 impl<K: Hash + Eq, V> DashTable<K, V> {
+    /// Buat tabel baru dengan minimal `capacity_groups` grup.
+    /// Kapasitas aktual dibulatkan ke atas ke 2^n.
     pub fn new(capacity_groups: usize) -> Self {
-        let capacity = capacity_groups.next_power_of_two();
+        let n_groups = capacity_groups.next_power_of_two().max(4);
         Self {
-            metadata: vec![GroupMetadata::new(); capacity],
-            entries: (0..(capacity * GROUP_SIZE)).map(|_| None).collect(),
+            meta: vec![GroupMeta::new(); n_groups],
+            entries: (0..n_groups * GROUP_SIZE).map(|_| None).collect(),
             hasher: RandomState::new(),
-            capacity_mask: capacity - 1,
+            group_mask: n_groups - 1,
+            occupied: 0,
+            tombstones: 0,
         }
     }
 
-    /// Mencari nilai berdasarkan kunci menggunakan instruksi SIMD
+    // --- public API ---
+
+    /// Cari value berdasarkan key. O(1) rata-rata dengan SIMD scan.
     pub fn get(&self, key: &K) -> Option<&V> {
-        let hash = self.hash_key(key);
-
-        // 1. Tentukan indeks grup dari 57 bit atas (H1)
-        let group_idx = (hash >> 7) as usize & self.capacity_mask;
-
-        // 2. Ambil 7 bit bawah sebagai fingerprint (H2), setel bit MSB agar tidak nol
-        let fingerprint = (hash & 0x7F | 0x80) as u8;
-
-        let group_meta = &self.metadata[group_idx];
-
-        // 3. Scan 16 slot sekaligus dalam 1 siklus CPU!
-        let mut bitmask = match_fingerprint(&group_meta.fingerprints, fingerprint);
-
-        // 4. Iterasi hanya pada slot yang bitmask-nya 1 (sangat jarang terjadi kolisi)
-        while bitmask != 0 {
-            // Dapatkan indeks bit pertama yang bernilai 1
-            let bit_idx = bitmask.trailing_zeros() as usize;
-
-            // Hitung indeks flat asli untuk entries
-            let entry_idx = (group_idx * GROUP_SIZE) + bit_idx;
-
-            if let Some((k, v)) = &self.entries[entry_idx] {
-                if k == key {
-                    return Some(v); // Kunci benar-benar cocok!
+        let (h1, h2) = self.split_hash(key);
+        let mut g = h1;
+        loop {
+            let meta = &self.meta[g];
+            // SIMD: cari semua slot dengan fingerprint sama
+            let mut mask = match_fingerprint(&meta.fps, h2);
+            while mask != 0 {
+                let bit = mask.trailing_zeros() as usize;
+                let idx = g * GROUP_SIZE + bit;
+                if let Some((k, v)) = &self.entries[idx] {
+                    if k == key {
+                        return Some(v);
+                    }
                 }
+                mask &= mask - 1;
             }
+            // Terminasi: grup sepenuhnya EMPTY → key pasti tidak ada
+            if all_empty(&meta.fps) {
+                return None;
+            }
+            g = self.next_group(g);
+            if g == h1 {
+                return None; // full wrap — seharusnya tidak terjadi jika load factor dijaga
+            }
+        }
+    }
 
-            // Hapus bit yang sudah dicek
-            bitmask &= bitmask - 1;
+    /// Insert atau overwrite key-value. Resize otomatis jika load factor tinggi.
+    pub fn insert(&mut self, key: K, value: V) {
+        // Resize sebelum insert jika diperlukan
+        if (self.occupied + self.tombstones) * 8 >= self.total_slots() * 7 {
+            self.resize();
         }
 
-        None
-    }
-    pub fn insert(&mut self, key: K, value: V) {
-        let hash = self.hash_key(&key);
+        let (h1, h2) = self.split_hash(&key);
+        let mut g = h1;
+        let mut first_avail: Option<usize> = None;
 
-        // 1. Tentukan indeks grup (H1) dan fingerprint (H2)
-        let group_idx = (hash >> 7) as usize & self.capacity_mask;
-        let fingerprint = (hash & 0x7F | 0x80) as u8;
+        loop {
+            // Salin 16 byte metadata ke stack (1 instruksi SIMD, negligible cost).
+            // Ini menghindari long-lived borrow dari self.meta yang bisa berkonflik
+            // dengan mutasi self.entries di bawah.
+            let fps: [u8; 16] = self.meta[g].fps;
 
-        let group_meta = &mut self.metadata[group_idx];
-
-        // 2. Cari slot kosong di dalam grup (linear probing internal grup)
-        // Untuk optimasi maksimal, ini juga bisa menggunakan SIMD scan untuk mencari EMPTY_FINGERPRINT
-        for bit_idx in 0..GROUP_SIZE {
-            if group_meta.fingerprints[bit_idx] == EMPTY_FINGERPRINT {
-                // 3. Simpan sidik jari di metadata agar bisa ditemukan oleh SIMD get()
-                group_meta.fingerprints[bit_idx] = fingerprint;
-
-                // 4. Hitung indeks flat dan simpan data riil
-                let entry_idx = (group_idx * GROUP_SIZE) + bit_idx;
-                self.entries[entry_idx] = Some((key, value));
+            // 1. Cek duplicate — cari slot dengan fingerprint cocok, lalu bandingkan key
+            let mut dup_idx: Option<usize> = None;
+            let mut mask = match_fingerprint(&fps, h2);
+            while mask != 0 {
+                let bit = mask.trailing_zeros() as usize;
+                let idx = g * GROUP_SIZE + bit;
+                if let Some((k, _)) = &self.entries[idx] {
+                    if k == &key {
+                        dup_idx = Some(idx);
+                        break;
+                    }
+                }
+                mask &= mask - 1;
+            }
+            // Jika ada duplicate, overwrite dan return — tidak perlu update occupied
+            if let Some(idx) = dup_idx {
+                self.entries[idx] = Some((key, value));
                 return;
             }
-        }
 
-        // Catatan: Jika grup ini penuh (collision), sistem produksi memerlukan logika
-        // 'Probing' ke grup tetangga atau mekanisme 'Resize'.
-        // Untuk tahap MVP ini, kita asumsikan kapasitas awal mencukupi.
-    }
-
-    pub fn remove(&mut self, key: &K) -> bool {
-        let hash = self.hash_key(key);
-
-        // 1. Hitung indeks grup (H1) dan fingerprint (H2)
-        let group_idx = (hash >> 7) as usize & self.capacity_mask;
-        let fingerprint = (hash & 0x7F | 0x80) as u8;
-
-        let group_meta = &mut self.metadata[group_idx];
-
-        // 2. Scan metadata menggunakan SIMD untuk mencari slot yang mungkin cocok
-        let mut bitmask = match_fingerprint(&group_meta.fingerprints, fingerprint);
-
-        // 3. Iterasi slot yang ditemukan oleh SIMD
-        while bitmask != 0 {
-            let bit_idx = bitmask.trailing_zeros() as usize;
-            let entry_idx = (group_idx * GROUP_SIZE) + bit_idx;
-
-            if let Some((k, _)) = &self.entries[entry_idx] {
-                if k == key {
-                    // --- LOGIKA PENGHAPUSAN KRUSIAL ---
-
-                    // A. Hapus data dari entries (membebaskan memori)
-                    self.entries[entry_idx] = None;
-
-                    // B. RESET METADATA ke status EMPTY (0x00)
-                    // Sangat penting agar pemindaian SIMD berikutnya melewati slot ini[cite: 1196].
-                    group_meta.fingerprints[bit_idx] = EMPTY_FINGERPRINT;
-
-                    return true; // Berhasil dihapus
+            // 2. Catat slot tersedia pertama (EMPTY atau DELETED)
+            if first_avail.is_none() {
+                let avail = find_available(&fps);
+                if avail != 0 {
+                    let bit = avail.trailing_zeros() as usize;
+                    first_avail = Some(g * GROUP_SIZE + bit);
                 }
             }
 
-            // Hapus bit yang sudah dicek untuk lanjut ke kandidat berikutnya
-            bitmask &= bitmask - 1;
+            // 3. Terminasi: grup sepenuhnya EMPTY → key tidak ada lebih jauh
+            if all_empty(&fps) {
+                break;
+            }
+
+            g = self.next_group(g);
+            if g == h1 {
+                break;
+            }
         }
 
-        false // Kunci tidak ditemukan
+        // Insert di slot yang ditemukan
+        let idx = first_avail
+            .expect("DashTable: tidak ada slot tersedia (resize seharusnya sudah terjadi)");
+        let g_idx = idx / GROUP_SIZE;
+        let b_idx = idx % GROUP_SIZE;
+        let was_deleted = self.meta[g_idx].fps[b_idx] == DELETED;
+
+        self.meta[g_idx].fps[b_idx] = h2;
+        self.entries[idx] = Some((key, value));
+        self.occupied += 1;
+        if was_deleted {
+            self.tombstones = self.tombstones.saturating_sub(1);
+        }
     }
 
+    /// Hapus key. Meninggalkan tombstone DELETED agar probe chain tetap valid.
+    /// Mengembalikan true jika key ditemukan dan dihapus.
+    pub fn remove(&mut self, key: &K) -> bool {
+        let (h1, h2) = self.split_hash(key);
+        let mut g = h1;
+        loop {
+            let fps = &self.meta[g].fps;
+            let mut mask = match_fingerprint(fps, h2);
+            while mask != 0 {
+                let bit = mask.trailing_zeros() as usize;
+                let idx = g * GROUP_SIZE + bit;
+                if let Some((k, _)) = &self.entries[idx] {
+                    if k == key {
+                        self.meta[g].fps[bit] = DELETED;
+                        self.entries[idx] = None;
+                        self.occupied = self.occupied.saturating_sub(1);
+                        self.tombstones += 1;
+                        return true;
+                    }
+                }
+                mask &= mask - 1;
+            }
+            if all_empty(fps) {
+                return false;
+            }
+            g = self.next_group(g);
+            if g == h1 {
+                return false;
+            }
+        }
+    }
+
+    /// Jumlah entry aktif.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.occupied
+    }
+
+    /// Hapus semua entry (FLUSHALL).
+    pub fn clear(&mut self) {
+        for m in &mut self.meta {
+            m.fps = [EMPTY; GROUP_SIZE];
+        }
+        for e in &mut self.entries {
+            *e = None;
+        }
+        self.occupied = 0;
+        self.tombstones = 0;
+    }
+
+    // --- internal ---
+
+    #[inline]
     fn hash_key(&self, key: &K) -> u64 {
         let mut h = self.hasher.build_hasher();
         key.hash(&mut h);
         h.finish()
+    }
+
+    #[inline]
+    fn split_hash(&self, key: &K) -> (usize, u8) {
+        let hash = self.hash_key(key);
+        let h1 = (hash >> 7) as usize & self.group_mask;
+        let h2 = make_fingerprint(hash);
+        (h1, h2)
+    }
+
+    #[inline]
+    fn next_group(&self, g: usize) -> usize {
+        (g + 1) & self.group_mask
+    }
+
+    #[inline]
+    fn total_slots(&self) -> usize {
+        self.meta.len() * GROUP_SIZE
+    }
+
+    /// Double kapasitas dan rehash semua entry hidup (tombstone dibuang).
+    fn resize(&mut self) {
+        let new_n_groups = (self.meta.len() * 2).max(4);
+        let mut new_table: DashTable<K, V> = DashTable::new(new_n_groups);
+        new_table.hasher = RandomState::new();
+
+        for entry in &mut self.entries {
+            if let Some((k, v)) = entry.take() {
+                new_table.insert(k, v);
+            }
+        }
+
+        self.meta = new_table.meta;
+        self.entries = new_table.entries;
+        self.hasher = new_table.hasher;
+        self.group_mask = new_table.group_mask;
+        self.occupied = new_table.occupied;
+        self.tombstones = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_insert_and_get() {
+        let mut t: DashTable<String, u64> = DashTable::new(4);
+        t.insert("hello".to_string(), 42);
+        t.insert("world".to_string(), 99);
+        assert_eq!(t.get(&"hello".to_string()), Some(&42));
+        assert_eq!(t.get(&"world".to_string()), Some(&99));
+        assert_eq!(t.get(&"missing".to_string()), None);
+    }
+
+    #[test]
+    fn test_overwrite() {
+        let mut t: DashTable<String, u64> = DashTable::new(4);
+        t.insert("k".to_string(), 1);
+        t.insert("k".to_string(), 2);
+        assert_eq!(t.get(&"k".to_string()), Some(&2));
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_tombstone() {
+        let mut t: DashTable<String, u64> = DashTable::new(4);
+        t.insert("a".to_string(), 10);
+        t.insert("b".to_string(), 20);
+        assert!(t.remove(&"a".to_string()));
+        assert_eq!(t.get(&"a".to_string()), None);
+        assert_eq!(t.get(&"b".to_string()), Some(&20));
+        assert_eq!(t.tombstones, 1);
+    }
+
+    #[test]
+    fn test_large_insert_with_resize() {
+        let mut t: DashTable<u32, u32> = DashTable::new(2);
+        for i in 0..500u32 {
+            t.insert(i, i * 2);
+        }
+        for i in 0..500u32 {
+            assert_eq!(t.get(&i), Some(&(i * 2)), "key {} hilang setelah resize", i);
+        }
+    }
+
+    #[test]
+    fn test_insert_reuses_deleted_slot() {
+        let mut t: DashTable<String, u32> = DashTable::new(4);
+        t.insert("x".to_string(), 1);
+        t.remove(&"x".to_string());
+        t.insert("x".to_string(), 99);
+        assert_eq!(t.get(&"x".to_string()), Some(&99));
+        assert_eq!(t.tombstones, 0); // slot DELETED dipakai ulang
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut t: DashTable<u32, u32> = DashTable::new(4);
+        for i in 0..50u32 {
+            t.insert(i, i);
+        }
+        t.clear();
+        assert_eq!(t.len(), 0);
+        assert_eq!(t.tombstones, 0);
+        for i in 0..50u32 {
+            assert_eq!(t.get(&i), None);
+        }
     }
 }

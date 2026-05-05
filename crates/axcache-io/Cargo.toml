@@ -9,3 +9,4 @@ description = "I/O engine untuk AxCache."
 
 [dependencies]
 monoio.workspace = true
+socket2.workspace = true

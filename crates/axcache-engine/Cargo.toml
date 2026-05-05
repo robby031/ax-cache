@@ -14,3 +14,4 @@ rkyv.workspace = true
 axcache-store = { path = "../axcache-store" }
 axcache-io = { path = "../axcache-io" }
 rand.workspace = true
+regex.workspace = true

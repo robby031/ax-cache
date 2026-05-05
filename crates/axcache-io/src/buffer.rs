@@ -1,5 +1,3 @@
-// crates/axcache-io/src/buffer.rs
-
 /// IoBuffer adalah representasi buffer statis yang kepemilikannya (ownership)
 /// bisa diserahkan ke kernel via io_uring dan dikembalikan lagi ke user space.
 pub struct IoBuffer {

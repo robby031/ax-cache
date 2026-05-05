@@ -1,5 +1,3 @@
-// crates/axcache-io/src/snapshot.rs
-
 use monoio::fs::File;
 use std::io::Result;
 
@@ -22,7 +20,7 @@ pub async fn save_shard_to_disk(core_id: usize, archived_data: Vec<u8>) -> Resul
     file.sync_all().await?;
 
     println!(
-        "💾 Core {}: Snapshot berhasil disimpan ke disk tanpa forking!",
+        "Core {}: Snapshot berhasil disimpan ke disk tanpa forking!",
         core_id
     );
     Ok(())
