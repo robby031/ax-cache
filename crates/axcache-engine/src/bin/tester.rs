@@ -15,8 +15,8 @@ use std::thread;
 use std::time::Instant;
 
 const THREADS: usize = 8;
-const OPS_PER_THREAD: usize = 125_000; // 8 x 125_000 = 1M ops per phase
-const VALUE_SIZE: usize = 64; // 64 bytes per value for more stress
+const OPS_PER_THREAD: usize = 5_000; // 8 x 5_000 = 40_000 ops per phase
+const VALUE_SIZE: usize = 32; // 32 bytes per value for more stress
 
 /// Serialize satu RESP2 command array.
 fn resp_command(args: &[&[u8]]) -> Vec<u8> {

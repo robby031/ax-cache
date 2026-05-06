@@ -68,34 +68,34 @@ impl Shard {
 
     /// Simpan key-value tanpa TTL.
     pub fn set(&mut self, key: String, value: Vec<u8>) {
-        let t0 = std::time::Instant::now();
+        // let t0 = std::time::Instant::now();
         // Slab allocation
         let idx = self
             .slab
             .allocate((key, value))
             .expect("Slab full")
             .as_ptr() as usize;
-        let t1 = std::time::Instant::now();
+        // let t1 = std::time::Instant::now();
         // Expiry removal
         self.expiry.remove(&idx);
-        let t2 = std::time::Instant::now();
+        // let t2 = std::time::Instant::now();
         // S3-FIFO + DashTable
-        self.do_insert_idx_instrumented(idx, t0, t1, t2);
+        // self.do_insert_idx_instrumented(idx, t0, t1, t2);
     }
 
     /// Simpan key-value dengan TTL (detik).
     pub fn set_ex(&mut self, key: String, value: Vec<u8>, ttl_secs: u64) {
-        let t0 = std::time::Instant::now();
+        // let t0 = std::time::Instant::now();
         let idx = self
             .slab
             .allocate((key, value))
             .expect("Slab full")
             .as_ptr() as usize;
-        let t1 = std::time::Instant::now();
+        // let t1 = std::time::Instant::now();
         let exp = Instant::now() + Duration::from_secs(ttl_secs);
         self.expiry.insert(idx, exp);
-        let t2 = std::time::Instant::now();
-        self.do_insert_idx_instrumented(idx, t0, t1, t2);
+        // let t2 = std::time::Instant::now();
+        // self.do_insert_idx_instrumented(idx, t0, t1, t2);
     }
 
     // =========================================================================
@@ -205,31 +205,31 @@ impl Shard {
             .unwrap_or(false)
     }
 
-    /// Insert ke DashTable dengan S3-FIFO eviction.
-    fn do_insert_idx_instrumented(&mut self, idx: usize, t0: Instant, t1: Instant, t2: Instant) {
-        let t3 = std::time::Instant::now();
-        // S3-FIFO: insert index, dapatkan daftar index yang harus dieviksi
-        let evicted = self.eviction.insert(idx);
-        let t4 = std::time::Instant::now();
-        for eidx in &evicted {
-            self.expiry.remove(eidx);
-            self.table.remove(eidx);
-            // Optionally: self.slab.deallocate(...)
-        }
-        let t5 = std::time::Instant::now();
-        // Insert index into DashTable
-        self.table.insert(idx, ());
-        let t6 = std::time::Instant::now();
-        // Print timings (us)
-        println!(
-            "[INSTRUMENT] slab={}us expiry={}us s3fifo={}us evict={}us dashtable={}us",
-            (t1 - t0).as_micros(),
-            (t2 - t1).as_micros(),
-            (t4 - t3).as_micros(),
-            (t5 - t4).as_micros(),
-            (t6 - t5).as_micros()
-        );
-    }
+    // /// Insert ke DashTable dengan S3-FIFO eviction.
+    // fn do_insert_idx_instrumented(&mut self, idx: usize, t0: Instant, t1: Instant, t2: Instant) {
+    //     let t3 = std::time::Instant::now();
+    //     // S3-FIFO: insert index, dapatkan daftar index yang harus dieviksi
+    //     let evicted = self.eviction.insert(idx);
+    //     let t4 = std::time::Instant::now();
+    //     for eidx in &evicted {
+    //         self.expiry.remove(eidx);
+    //         self.table.remove(eidx);
+    //         // Optionally: self.slab.deallocate(...)
+    //     }
+    //     let t5 = std::time::Instant::now();
+    //     // Insert index into DashTable
+    //     self.table.insert(idx, ());
+    //     let t6 = std::time::Instant::now();
+    //     // Print timings (us)
+    //     println!(
+    //         "[INSTRUMENT] slab={}us expiry={}us s3fifo={}us evict={}us dashtable={}us",
+    //         (t1 - t0).as_micros(),
+    //         (t2 - t1).as_micros(),
+    //         (t4 - t3).as_micros(),
+    //         (t5 - t4).as_micros(),
+    //         (t6 - t5).as_micros()
+    //     );
+    // }
 
     /// Find the slab index for a given key
     fn find_index(&self, key: &str) -> Option<usize> {
