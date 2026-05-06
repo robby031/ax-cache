@@ -3,16 +3,20 @@
 // Stress tester AxCache menggunakan RESP2 protocol (Redis-compatible).
 // Kompatibel dengan redis-rs client library.
 
+use rand::RngExt;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use std::error::Error;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::net::TcpStream;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
 const THREADS: usize = 8;
-const OPS_PER_THREAD: usize = 20_000;
-const VALUE_SIZE: usize = 64; // 64 bytes per value (realistic cache entry)
+const OPS_PER_THREAD: usize = 125_000; // 8 x 125_000 = 1M ops per phase
+const VALUE_SIZE: usize = 64; // 64 bytes per value for more stress
 
 /// Serialize satu RESP2 command array.
 fn resp_command(args: &[&[u8]]) -> Vec<u8> {
@@ -63,47 +67,61 @@ fn read_response(stream: &mut TcpStream) -> String {
     }
 }
 
-fn worker(thread_id: usize) -> TestResult {
+fn worker(
+    thread_id: usize,
+    set_latencies: Arc<Mutex<Vec<f64>>>,
+    get_latencies: Arc<Mutex<Vec<f64>>>,
+) -> TestResult {
     let mut stream =
         TcpStream::connect("127.0.0.1:6379").expect("Gagal connect ke AxCache di 127.0.0.1:6379");
     stream.set_nodelay(true).unwrap();
 
-    let value = vec![b'A' + (thread_id as u8 % 26); VALUE_SIZE];
-    let start = Instant::now();
+    let mut rng = StdRng::seed_from_u64(thread_id as u64 * 12345);
+    let mut value = vec![0u8; VALUE_SIZE];
+    let mut set_lat = Vec::with_capacity(OPS_PER_THREAD);
+    let mut get_lat = Vec::with_capacity(OPS_PER_THREAD);
 
+    let start = Instant::now();
     // ── SET benchmark ───────────────────────────────────────────────
     for i in 0..OPS_PER_THREAD {
+        rng.fill(&mut value[..]);
         let key = format!("bench:{}:{}", thread_id, i);
         let cmd = resp_command(&[b"SET", key.as_bytes(), &value]);
         let msg = format!("Gagal mengirim command SET untuk key {}", key);
+        let op_start = Instant::now();
         stream.write_all(&cmd).expect(&msg);
         read_response(&mut stream); // consume +OK
+        let op_lat = op_start.elapsed().as_secs_f64() * 1_000_000.0; // us
+        set_lat.push(op_lat);
     }
-
     let set_elapsed = start.elapsed();
 
     // ── GET benchmark ───────────────────────────────────────────────
     let get_start = Instant::now();
     let mut hits = 0usize;
-
     for i in 0..OPS_PER_THREAD {
         let key = format!("bench:{}:{}", thread_id, i);
         let cmd = resp_command(&[b"GET", key.as_bytes()]);
         let msg = format!("Gagal mengirim command GET untuk key {}", key);
+        let op_start = Instant::now();
         stream.write_all(&cmd).expect(&msg);
         let resp = read_response(&mut stream);
+        let op_lat = op_start.elapsed().as_secs_f64() * 1_000_000.0; // us
+        get_lat.push(op_lat);
         if !resp.is_empty() && resp != "(nil)" {
             hits += 1;
         }
     }
-
     let get_elapsed = get_start.elapsed();
+
+    set_latencies.lock().unwrap().extend(set_lat);
+    get_latencies.lock().unwrap().extend(get_lat);
 
     let set_qps = OPS_PER_THREAD as f64 / set_elapsed.as_secs_f64();
     let get_qps = OPS_PER_THREAD as f64 / get_elapsed.as_secs_f64();
 
     println!(
-        "[Thread {:2}] SET {:>6} ops/s ({:.6}ms) | GET {:>6} ops/s ({:.6}ms) | hits={}/{}",
+        "[Thread {:2}] SET {:>8} ops/s ({:.2} ms) | GET {:>8} ops/s ({:.2} ms) | hits={}/{}",
         thread_id,
         set_qps as u64,
         set_elapsed.as_secs_f64() * 1000.0,
@@ -160,6 +178,16 @@ fn write_csv(path: &str, results: &[TestResult]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn percentile(data: &[f64], pct: f64) -> f64 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted[idx]
+}
+
 fn main() {
     println!("AxCache Stress Tester (RESP2)");
     println!(
@@ -169,8 +197,14 @@ fn main() {
     println!("Pastikan AxCache sudah berjalan di 127.0.0.1:6379\n");
 
     let overall_start = Instant::now();
+    let set_latencies = Arc::new(Mutex::new(Vec::with_capacity(THREADS * OPS_PER_THREAD)));
+    let get_latencies = Arc::new(Mutex::new(Vec::with_capacity(THREADS * OPS_PER_THREAD)));
     let handles: Vec<_> = (0..THREADS)
-        .map(|t| thread::spawn(move || worker(t)))
+        .map(|t| {
+            let set_lat = Arc::clone(&set_latencies);
+            let get_lat = Arc::clone(&get_latencies);
+            thread::spawn(move || worker(t, set_lat, get_lat))
+        })
         .collect();
 
     let mut results = Vec::with_capacity(THREADS);
@@ -188,5 +222,23 @@ fn main() {
         total_ops,
         total_secs,
         total_ops as f64 / total_secs
+    );
+
+    // Latency stats
+    let set_lat = set_latencies.lock().unwrap();
+    let get_lat = get_latencies.lock().unwrap();
+    println!(
+        "\nSET Latency (us): min={:.1} p50={:.1} p99={:.1} max={:.1}",
+        set_lat.iter().cloned().fold(f64::INFINITY, f64::min),
+        percentile(&set_lat, 50.0),
+        percentile(&set_lat, 99.0),
+        set_lat.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    );
+    println!(
+        "GET Latency (us): min={:.1} p50={:.1} p99={:.1} max={:.1}",
+        get_lat.iter().cloned().fold(f64::INFINITY, f64::min),
+        percentile(&get_lat, 50.0),
+        percentile(&get_lat, 99.0),
+        get_lat.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
     );
 }

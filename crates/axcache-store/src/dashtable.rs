@@ -126,6 +126,7 @@ impl<K: Hash + Eq, V> DashTable<K, V> {
             }
             // Jika ada duplicate, overwrite dan return — tidak perlu update occupied
             if let Some(idx) = dup_idx {
+                println!("[insert] OVERWRITE idx={}", idx);
                 self.entries[idx] = Some((key, value));
                 return;
             }
@@ -157,6 +158,7 @@ impl<K: Hash + Eq, V> DashTable<K, V> {
         let b_idx = idx % GROUP_SIZE;
         let was_deleted = self.meta[g_idx].fps[b_idx] == DELETED;
 
+        println!("[insert] NEW idx={}", idx);
         self.meta[g_idx].fps[b_idx] = h2;
         self.entries[idx] = Some((key, value));
         self.occupied += 1;
@@ -280,9 +282,15 @@ mod tests {
     #[test]
     fn test_overwrite() {
         let mut t: DashTable<String, u64> = DashTable::new(4);
-        t.insert("k".to_string(), 1);
-        t.insert("k".to_string(), 2);
-        assert_eq!(t.get(&"k".to_string()), Some(&2));
+        let k1 = "k".to_string();
+        let k2 = "k".to_string();
+        let h1 = t.hash_key(&k1);
+        let h2 = t.hash_key(&k2);
+        println!("[test_overwrite] hash1={:x} hash2={:x}", h1, h2);
+        t.insert(k1.clone(), 1);
+        t.insert(k2.clone(), 2);
+        println!("[test_overwrite] after insert: {:?}", t.get(&k2));
+        assert_eq!(t.get(&k2), Some(&2));
         assert_eq!(t.len(), 1);
     }
 

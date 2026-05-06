@@ -116,18 +116,18 @@ dependencies = [
 
 [[package]]
 name = "axhash"
-version = "0.6.9"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2cb2f5f89f051a80e6a86df1279ca5f5d764ddfea67e2b44115b462c6a38017"
+checksum = "104f33f960fed0568172909899fe5ac687053fb61b4b3693b12d2d3aceaa532b"
 dependencies = [
  "axhash-core",
 ]
 
 [[package]]
 name = "axhash-core"
-version = "0.6.9"
+version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41665882edcaf7e6980d0505d86762c9e0f689363d1aff1dcd383a9cc262de84"
+checksum = "329415dd0a5b8db7be541179916e42bc4cab7edd8bf1fe6d917f7c7fb16e6396"
 
 [[package]]
 name = "bitflags"

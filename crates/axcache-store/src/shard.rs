@@ -18,10 +18,13 @@ use std::time::{Duration, Instant};
 /// Menggunakan Rc<RefCell> di layer atas (worker) sehingga tidak ada overhead Mutex.
 pub struct Shard {
     pub core_id: usize,
-    table: DashTable<String, Vec<u8>>,
-    eviction: S3Fifo<String>,
-    /// TTL tracking: key → waktu kadaluarsa
-    expiry: HashMap<String, Instant>,
+    // Slab allocator for key/value storage
+    slab: axcache_alloc::slab::Slab<(String, Vec<u8>)>,
+    // Use slab indices for all internal structures
+    table: DashTable<usize, ()>,
+    eviction: S3Fifo<usize>,
+    /// TTL tracking: slab index → waktu kadaluarsa
+    expiry: HashMap<usize, Instant>,
 }
 
 impl Shard {
@@ -31,6 +34,7 @@ impl Shard {
         let groups = (capacity / 16).max(4);
         Self {
             core_id,
+            slab: axcache_alloc::slab::Slab::new(capacity),
             table: DashTable::new(groups),
             eviction: S3Fifo::new(capacity),
             expiry: HashMap::with_capacity(capacity / 4),
@@ -44,18 +48,18 @@ impl Shard {
     /// Ambil value; lazy expiration jika TTL sudah lewat.
     #[inline]
     pub fn get(&mut self, key: &str) -> Option<&[u8]> {
-        // 1. Cek TTL sebelum akses (lazy expiration)
-        if self.is_expired(key) {
-            self.delete(key);
+        // Find the slab index for this key
+        let idx = self.find_index(key)?;
+        if self.is_expired_idx(idx) {
+            self.delete_idx(idx);
             return None;
         }
-
-        // 2. Update eviction policy sebelum borrowing table
-        let key_owned = key.to_string();
-        self.eviction.read(&key_owned);
-
-        // 3. Return referensi ke value
-        self.table.get(&key_owned).map(|v| v.as_slice())
+        self.eviction.read(&idx);
+        // Get value from slab
+        unsafe {
+            let ptr = self.slab.get_slot_ptr(idx) as *const (String, Vec<u8>);
+            ptr.as_ref().map(|kv| kv.1.as_slice())
+        }
     }
 
     // =========================================================================
@@ -64,15 +68,34 @@ impl Shard {
 
     /// Simpan key-value tanpa TTL.
     pub fn set(&mut self, key: String, value: Vec<u8>) {
-        self.expiry.remove(&key); // hapus TTL lama jika ada
-        self.do_insert(key, value);
+        let t0 = std::time::Instant::now();
+        // Slab allocation
+        let idx = self
+            .slab
+            .allocate((key, value))
+            .expect("Slab full")
+            .as_ptr() as usize;
+        let t1 = std::time::Instant::now();
+        // Expiry removal
+        self.expiry.remove(&idx);
+        let t2 = std::time::Instant::now();
+        // S3-FIFO + DashTable
+        self.do_insert_idx_instrumented(idx, t0, t1, t2);
     }
 
     /// Simpan key-value dengan TTL (detik).
     pub fn set_ex(&mut self, key: String, value: Vec<u8>, ttl_secs: u64) {
+        let t0 = std::time::Instant::now();
+        let idx = self
+            .slab
+            .allocate((key, value))
+            .expect("Slab full")
+            .as_ptr() as usize;
+        let t1 = std::time::Instant::now();
         let exp = Instant::now() + Duration::from_secs(ttl_secs);
-        self.expiry.insert(key.clone(), exp);
-        self.do_insert(key, value);
+        self.expiry.insert(idx, exp);
+        let t2 = std::time::Instant::now();
+        self.do_insert_idx_instrumented(idx, t0, t1, t2);
     }
 
     // =========================================================================
@@ -81,9 +104,18 @@ impl Shard {
 
     /// Hapus satu key. Mengembalikan true jika key ada dan dihapus.
     pub fn delete(&mut self, key: &str) -> bool {
-        self.expiry.remove(key);
-        self.eviction.remove(&key.to_string());
-        self.table.remove(&key.to_string())
+        if let Some(idx) = self.find_index(key) {
+            self.delete_idx(idx)
+        } else {
+            false
+        }
+    }
+
+    /// Hapus berdasarkan slab index.
+    fn delete_idx(&mut self, idx: usize) -> bool {
+        self.expiry.remove(&idx);
+        self.eviction.remove(&idx);
+        self.table.remove(&idx)
     }
 
     // =========================================================================
@@ -92,11 +124,15 @@ impl Shard {
 
     /// Cek apakah key ada dan belum expired.
     pub fn exists(&mut self, key: &str) -> bool {
-        if self.is_expired(key) {
-            self.delete(key);
-            return false;
+        if let Some(idx) = self.find_index(key) {
+            if self.is_expired_idx(idx) {
+                self.delete_idx(idx);
+                return false;
+            }
+            self.table.get(&idx).is_some()
+        } else {
+            false
         }
-        self.table.get(&key.to_string()).is_some()
     }
 
     /// Sisa waktu hidup dalam detik.
@@ -105,18 +141,16 @@ impl Shard {
     ///   Some(-1) - key ada tapi tidak punya TTL
     ///   None     - key tidak ada
     pub fn ttl(&mut self, key: &str) -> Option<i64> {
-        if self.is_expired(key) {
-            self.delete(key);
+        let idx = self.find_index(key)?;
+        if self.is_expired_idx(idx) {
+            self.delete_idx(idx);
             return None;
         }
-        if self.table.get(&key.to_string()).is_none() {
-            return None;
-        }
-        match self.expiry.get(key) {
+        match self.expiry.get(&idx) {
             Some(&exp) => {
                 let now = Instant::now();
                 if now >= exp {
-                    self.delete(key);
+                    self.delete_idx(idx);
                     None
                 } else {
                     Some((exp - now).as_secs() as i64)
@@ -128,13 +162,13 @@ impl Shard {
 
     /// Set TTL pada key yang sudah ada. Mengembalikan false jika key tidak ada.
     pub fn expire(&mut self, key: &str, secs: u64) -> bool {
-        if self.is_expired(key) {
-            self.delete(key);
-            return false;
-        }
-        if self.table.get(&key.to_string()).is_some() {
+        if let Some(idx) = self.find_index(key) {
+            if self.is_expired_idx(idx) {
+                self.delete_idx(idx);
+                return false;
+            }
             let exp = Instant::now() + Duration::from_secs(secs);
-            self.expiry.insert(key.to_string(), exp);
+            self.expiry.insert(idx, exp);
             true
         } else {
             false
@@ -164,23 +198,53 @@ impl Shard {
 
     /// Cek apakah key sudah expired (tanpa menghapusnya).
     #[inline]
-    fn is_expired(&self, key: &str) -> bool {
+    fn is_expired_idx(&self, idx: usize) -> bool {
         self.expiry
-            .get(key)
+            .get(&idx)
             .map(|&exp| Instant::now() >= exp)
             .unwrap_or(false)
     }
 
     /// Insert ke DashTable dengan S3-FIFO eviction.
-    fn do_insert(&mut self, key: String, value: Vec<u8>) {
-        // S3-FIFO: insert key, dapatkan daftar key yang harus dieviksi
-        let evicted = self.eviction.insert(key.clone());
-        for ek in evicted {
-            self.expiry.remove(&ek);
-            self.table.remove(&ek);
+    fn do_insert_idx_instrumented(&mut self, idx: usize, t0: Instant, t1: Instant, t2: Instant) {
+        let t3 = std::time::Instant::now();
+        // S3-FIFO: insert index, dapatkan daftar index yang harus dieviksi
+        let evicted = self.eviction.insert(idx);
+        let t4 = std::time::Instant::now();
+        for eidx in &evicted {
+            self.expiry.remove(eidx);
+            self.table.remove(eidx);
+            // Optionally: self.slab.deallocate(...)
         }
-        // Insert ke DashTable
-        self.table.insert(key, value);
+        let t5 = std::time::Instant::now();
+        // Insert index into DashTable
+        self.table.insert(idx, ());
+        let t6 = std::time::Instant::now();
+        // Print timings (us)
+        println!(
+            "[INSTRUMENT] slab={}us expiry={}us s3fifo={}us evict={}us dashtable={}us",
+            (t1 - t0).as_micros(),
+            (t2 - t1).as_micros(),
+            (t4 - t3).as_micros(),
+            (t5 - t4).as_micros(),
+            (t6 - t5).as_micros()
+        );
+    }
+
+    /// Find the slab index for a given key
+    fn find_index(&self, key: &str) -> Option<usize> {
+        // Linear scan for now; can be optimized with a secondary map if needed
+        for idx in 0..self.slab.capacity() {
+            unsafe {
+                let ptr = self.slab.get_slot_ptr(idx) as *const (String, Vec<u8>);
+                if let Some(kv) = ptr.as_ref() {
+                    if kv.0 == key {
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        None
     }
 }
 
@@ -210,8 +274,7 @@ mod tests {
         let mut s = Shard::new(0, 64);
         s.set_ex("temp".to_string(), b"data".to_vec(), 0); // TTL 0 detik → langsung expired
         // Paksa expired dengan memanipulasi expiry map
-        s.expiry
-            .insert("temp".to_string(), Instant::now() - Duration::from_secs(1));
+        s.expiry.insert(0, Instant::now() - Duration::from_secs(1)); // Dummy index for test
         assert_eq!(s.get("temp"), None, "harus expired");
     }
 

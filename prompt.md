@@ -261,44 +261,67 @@ If system shows:
 
 ---
 
-END OF SPEC
-
-**Struktur direktori:**
+```doc
 axcache/
-├── Cargo.toml // Root workspace manifest (LTO, opt-level=3, panic=abort)
-├── crates/
-│ ├── axcache-axhash/ // Mesin hashing 65 GiB/s. Isolasi total dari I/O.
-│ │ ├── src/
-│ │ │ ├── folded_mul.rs // Implementasi bit-folding u64 x u64 -> u128.
-│ │ │ └── lib.rs // Entry point AxHash dengan state RandomState untuk anti-HashDoS.
-│ │
-│ ├── axcache-alloc/ // Custom allocator. Mem-bypass glibc malloc.
-│ │ ├── src/
-│ │ │ ├── slab.rs // Logika Slab Allocation untuk objek ukuran tetap (cache line aligned).
-│ │ │ └── lib.rs // Wrapper mimalloc/snmalloc via #[global_allocator].
-│ │
-│ ├── axcache-store/ // Core penyimpanan data (Shared-Nothing).
-│ │ ├── src/
-│ │ │ ├── dashtable.rs // Implementasi open addressing hash map.
-│ │ │ ├── simd_scan.rs // Modul pencarian metadata 16/32 bit menggunakan core::simd.
-│ │ │ └── shard.rs // Representasi partisi data privat per-core.
-│ │
-│ ├── axcache-evict/ // Algoritma eviksi memori (Tanpa Lock).
-│ │ ├── src/
-│ │ │ ├── s3_fifo.rs // Logika 3-Queue (Small, Main, Ghost) demotion/promotion.
-│ │ │ └── sieve.rs // Implementasi evaluasi lazy bit "visited".
-│ │
-│ ├── axcache-io/ // Manajemen asinkron dan networking kernel.
-│ │ ├── src/
-│ │ │ ├── net.rs // Wrapper io_uring TCP listener & socket.
-│ │ │ ├── buffer.rs // Manajemen ring buffer statis untuk I/O kernel.
-│ │ │ └── snapshot.rs // Logika Fork-less disk snapshotting asinkron.
-│ │
-│ └── axcache-engine/ // Orkestrator, protokol, dan worker management.
-│ ├── src/
-│ │ ├── worker.rs // Loop event TPC, thread pinning (core affinity).
-│ │ ├── spsc.rs // Wait-free message passing lintas worker.
-│ │ └── protocol.rs // Parser command klien (zero-copy dengan rkyv).
+├── Cargo.toml
+│   └── Root workspace manifest (LTO, opt-level=3, panic=abort)
 │
-└── src/ // Binari utama.
-└── main.rs // Bootstrapping CLI, inisialisasi hardware, spawn TPC workers.
+├── crates/
+│   ├── axcache-axhash/
+│   │   ├── src/
+│   │   │   ├── folded_mul.rs
+│   │   │   │   └── Implementasi bit-folding u64 x u64 -> u128
+│   │   │   └── lib.rs
+│   │   │       └── Entry point AxHash dengan state RandomState untuk anti-HashDoS
+│   │   └── Mesin hashing 65 GiB/s. Isolasi total dari I/O
+│   │
+│   ├── axcache-alloc/
+│   │   ├── src/
+│   │   │   ├── slab.rs
+│   │   │   │   └── Logika Slab Allocation untuk objek ukuran tetap (cache line aligned)
+│   │   │   └── lib.rs
+│   │   │       └── Wrapper mimalloc/snmalloc via #[global_allocator]
+│   │   └── Custom allocator. Mem-bypass glibc malloc
+│   │
+│   ├── axcache-store/
+│   │   ├── src/
+│   │   │   ├── dashtable.rs
+│   │   │   │   └── Implementasi open addressing hash map
+│   │   │   ├── simd_scan.rs
+│   │   │   │   └── Modul pencarian metadata 16/32 bit menggunakan core::simd
+│   │   │   └── shard.rs
+│   │   │       └── Representasi partisi data privat per-core
+│   │   └── Core penyimpanan data (Shared-Nothing)
+│   │
+│   ├── axcache-evict/
+│   │   ├── src/
+│   │   │   ├── s3_fifo.rs
+│   │   │   │   └── Logika 3-Queue (Small, Main, Ghost) demotion/promotion
+│   │   │   └── sieve.rs
+│   │   │       └── Implementasi evaluasi lazy bit "visited"
+│   │   └── Algoritma eviksi memori (Tanpa Lock)
+│   │
+│   ├── axcache-io/
+│   │   ├── src/
+│   │   │   ├── net.rs
+│   │   │   │   └── Wrapper io_uring TCP listener & socket
+│   │   │   ├── buffer.rs
+│   │   │   │   └── Manajemen ring buffer statis untuk I/O kernel
+│   │   │   └── snapshot.rs
+│   │   │       └── Logika Fork-less disk snapshotting asinkron
+│   │   └── Manajemen asinkron dan networking kernel
+│   │
+│   └── axcache-engine/
+│       ├── src/
+│       │   ├── worker.rs
+│       │   │   └── Loop event TPC, thread pinning (core affinity)
+│       │   ├── spsc.rs
+│       │   │   └── Wait-free message passing lintas worker
+│       │   └── protocol.rs
+│       │       └── Parser command klien (zero-copy dengan rkyv)
+│       └── Orkestrator, protokol, dan worker management
+│
+└── src/
+    └── main.rs
+        └── Bootstrapping CLI, inisialisasi hardware, spawn TPC workers
+```

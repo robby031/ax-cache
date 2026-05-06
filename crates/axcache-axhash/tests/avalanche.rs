@@ -1,14 +1,14 @@
 // crates/axcache-axhash/tests/avalanche.rs
 
-use axcache_axhash::hash_item;
+use axhash::hash_value;
 
 #[test]
 fn test_avalanche_effect() {
     let input1 = b"hello axhash1";
     let input2 = b"hello axhash2"; // Hanya beda 1 karakter di akhir
 
-    let hash1 = hash_item(&input1);
-    let hash2 = hash_item(&input2);
+    let hash1 = hash_value(&input1);
+    let hash2 = hash_value(&input2);
 
     // Hitung jumlah bit yang berbeda (Hamming Distance)
     let bit_diff = (hash1 ^ hash2).count_ones();

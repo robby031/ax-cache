@@ -7,8 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Hash engine untuk AxCache."
 
+
+
 [dependencies]
-axhash.workspace = true
+axhash = "0.7.9"
 rand.workspace = true
 
 [dev-dependencies]

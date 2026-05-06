@@ -88,7 +88,7 @@ impl<T> Slab<T> {
 
     /// Mengambil raw pointer ke slot tertentu berdasarkan ukurannya
     #[inline(always)]
-    fn get_slot_ptr(&self, index: usize) -> *mut u8 {
+    pub fn get_slot_ptr(&self, index: usize) -> *mut u8 {
         let slot_size = size_of::<T>().max(size_of::<usize>());
         unsafe { self.memory.as_ptr().add(index * slot_size) }
     }
