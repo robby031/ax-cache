@@ -86,7 +86,10 @@ impl<K: Hash + Eq + Clone> Sieve<K> {
     // --- internal ---
 
     fn place(&mut self, key: K) {
-        let slot = self.free_list.pop().expect("free_list empty but count < capacity");
+        let slot = self
+            .free_list
+            .pop()
+            .expect("free_list empty but count < capacity");
         self.entries[slot] = Some(key.clone());
         self.index.insert(key.clone(), slot);
         self.visited.insert(key, false);
