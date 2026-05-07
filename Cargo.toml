@@ -6,43 +6,9 @@ license = "MIT"
 repository = "https://github.com/robby031/axcache"
 description = "AxCache: High-performance zero-tax cache engine."
 
-[workspace.dependencies]
-core_affinity = "0.8.3"
-monoio = { version = "0.2.4", features = ["sync", "legacy"] }
-axhash = "0.7.9"
-rand = "0.10.1"
-mimalloc = "0.1.39"
-rkyv = "0.8.16"
-criterion = "0.8.2"
-socket2 = { version = "0.6.3", features = ["all"] }
-ctrlc = { version = "3.4", features = ["termination"] }
-regex = "1.12.3"
-csv = "1.4.0"
-
 [package]
 name = "axcache"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-core_affinity = "0.8.3"
-axcache-engine = { path = "crates/axcache-engine" }
-ctrlc.workspace = true
-
-[workspace]
-resolver = "2"
-members = [
-    "crates/axcache-axhash",
-    "crates/axcache-alloc",
-    "crates/axcache-store",
-    "crates/axcache-evict",
-    "crates/axcache-io",
-    "crates/axcache-engine"
-]
-
-[profile.release]
-opt-level = 3         
-lto = "fat"           
-codegen-units = 1    
-panic = "abort"     
-strip = true          
