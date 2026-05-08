@@ -34,3 +34,4 @@ harness = false
 [[bench]]
 name = "scan_resistance"
 harness = false
+

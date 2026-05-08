@@ -84,6 +84,29 @@ Measured on Apple Silicon M4 (`release` build).
 | Hot+Scan (1K hot, 100K scan)   | 100% hot survival |    29,151 |
 | 3-tier (hot/warm/cold 60/35/5) |             75.4% |   243,387 |
 
+### Head-to-head comparison
+
+All sync variants, cycling keys, Apple Silicon M4, `release` build.
+
+**Single-thread latency (2M iterations)**
+
+| Benchmark        | ax-cache    | quick_cache | mini-moka   |
+| ---------------- | ----------: | ----------: | ----------: |
+| `get` (hit)      |    9.4 ns   |    6.7 ns   |  104.7 ns   |
+| `insert` (new)   |   78.7 ns   |   50.7 ns   |  303.7 ns   |
+
+**Multi-thread throughput (Zipf α=0.99, 95% read / 5% write)**
+
+| Threads | ax-cache     | quick_cache  | mini-moka    |
+| ------: | -----------: | -----------: | -----------: |
+|       1 | 20.9 Mops/s  | 22.2 Mops/s  |  5.3 Mops/s  |
+|       4 | 45.5 Mops/s  | 69.4 Mops/s  | 10.1 Mops/s  |
+|       8 | 51.8 Mops/s  | 70.9 Mops/s  |  5.8 Mops/s  |
+
+> **Note:** `quick_cache` leads on raw throughput; `ax-cache` differentiates
+> on **hit ratio** via S3-FIFO eviction + TinyLFU admission — see the hit
+> ratio & scan resistance table above. Both are far ahead of `mini-moka`.
+
 Run the benchmarks yourself:
 
 ```bash
