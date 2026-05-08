@@ -1,0 +1,37 @@
+[package]
+name = "ax-cache"
+version = "0.1.0"
+edition = "2024"
+authors = ["Bagus Dwi Harianto <robbymangkualam2000@gmail.com>"]
+license = "MIT"
+description = "Hardware-aware concurrent cache engine. Sharded SwissTable with S3-FIFO eviction, fueled by axhash."
+keywords = ["cache", "concurrent", "swisstable", "s3-fifo", "performance"]
+categories = ["caching", "concurrency", "data-structures"]
+
+[dependencies]
+axhash-core = "0.8.2"
+hashbrown   = "0.17.0"
+parking_lot = "0.12.5"
+slab        = "0.4.12"
+
+[dev-dependencies]
+criterion    = { version = "0.8.2", features = ["html_reports"] }
+hdrhistogram = "7.5.4"
+rand = { version = "0.10.1", features = ["small_rng"] }
+rand_distr   = "0.6.0"
+
+[[bench]]
+name = "single_thread"
+harness = false
+
+[[bench]]
+name = "zipfian"
+harness = false
+
+[[bench]]
+name = "contention"
+harness = false
+
+[[bench]]
+name = "scan_resistance"
+harness = false
