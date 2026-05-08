@@ -9,18 +9,9 @@ pub(crate) struct CountMinSketch {
 }
 
 impl CountMinSketch {
-    // Create a new sketch sized for `capacity` cache entries.
-    // Total memory = "2 × capacity" bytes (4 rows × capacity/2 width).
-    // Sized to fit in L2 for typical per-shard capacities (64K entries).
     pub(crate) fn new(capacity: usize) -> Self {
-        // Width must be a power of two for bitmask indexing. Total sketch
-        // size = ROWS × width bytes. We target ~2× capacity total counters
-        // (empirically good balance between accuracy and L2-friendliness).
-        // For a 100K-entry shard: 4 × 64K = 256KB, fits in L2 comfortably.
         let width = (capacity / 2).max(16).next_power_of_two();
         let width_mask = width - 1;
-        // Decay roughly every capacity insertions so the window tracks
-        // recent access patterns, not the entire lifetime.
         let decay_interval = capacity.max(1);
         Self {
             table: vec![0u8; ROWS * width],
@@ -31,14 +22,11 @@ impl CountMinSketch {
         }
     }
 
-    // Increment the frequency estimate for a key (by its pre-computed hash).
-    // Also triggers periodic decay.
     #[inline]
     pub(crate) fn increment(&mut self, hash: u64) {
         let hashes = derive_hashes(hash);
         for (row, &h) in hashes.iter().enumerate() {
             let idx = row * self.width + (h as usize & self.width_mask);
-            // Saturating add to avoid wrapping.
             self.table[idx] = self.table[idx].saturating_add(1);
         }
         self.additions += 1;
@@ -47,7 +35,6 @@ impl CountMinSketch {
         }
     }
 
-    // Return the estimated frequency of a key (minimum across all rows).
     #[inline]
     pub(crate) fn estimate(&self, hash: u64) -> u8 {
         let hashes = derive_hashes(hash);
@@ -59,8 +46,6 @@ impl CountMinSketch {
         min
     }
 
-    // Halve all counters (right-shift by 1). This decays old frequencies so
-    // the sketch adapts to changing access patterns.
     fn decay(&mut self) {
         for cell in self.table.iter_mut() {
             *cell >>= 1;
@@ -69,8 +54,6 @@ impl CountMinSketch {
     }
 }
 
-// Derive 4 independent row indices from a single 64-bit hash using cheap
-// bit-mixing rotations. This avoids calling "Hash::hash" 4× on the hot path.
 #[inline(always)]
 fn derive_hashes(h: u64) -> [u64; ROWS] {
     let h0 = h;
@@ -105,7 +88,7 @@ mod tests {
         for _ in 0..100 {
             cms.increment(a);
         }
-        // b should have a much lower estimate than a.
+
         let est_a = cms.estimate(a);
         let est_b = cms.estimate(b);
         assert!(est_a > est_b, "a={} b={}", est_a, est_b);

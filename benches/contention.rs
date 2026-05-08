@@ -1,15 +1,3 @@
-// Multi-thread contention sweep with per-op latency histograms.
-// Criterion is deliberately *not* used here — we want raw per-op latencies
-// aggregated into an HdrHistogram so we can read p50 / p99 / p999 / max
-// under contention, not just throughput. Each thread records its own
-// histogram (no contention on the histogram itself); the main thread merges
-// them after the run.
-
-// Run with
-// cargo bench --bench contention
-// Or with smoke-test:
-// AXCACHE_BENCH_OPS=10000 AXCACHE_BENCH_THREADS=1,2,4 cargo bench --bench contention
-
 use ax_cache::Cache;
 use hdrhistogram::Histogram;
 use rand::rngs::SmallRng;
@@ -71,8 +59,6 @@ impl Config {
 
 fn run_sweep(cfg: &Config, threads: usize, ops_per_thread: usize) -> SweepResult {
     let cache: Arc<Cache<u64, u64>> = Arc::new(Cache::with_shards(cfg.capacity, cfg.shards));
-    // Pre-warm: every key in the working set already resident, so steady state
-    // hit ratio dominates the measurement.
     for i in 0..cfg.capacity as u64 {
         cache.insert(i, i);
     }
@@ -86,13 +72,10 @@ fn run_sweep(cfg: &Config, threads: usize, ops_per_thread: usize) -> SweepResult
         let cache = Arc::clone(&cache);
         let go = Arc::clone(&go);
         handles.push(thread::spawn(move || {
-            // 3 sig figs is enough for cache latency report.
             let mut hist = Histogram::<u64>::new(3).expect("histogram");
             let mut rng = SmallRng::seed_from_u64(0xC0FFEE ^ tid as u64);
             let zipf = Zipf::new(universe as f64, alpha).expect("zipf");
 
-            // Spin until the launcher releases all threads simultaneously
-            // this avoids early threads finishing before later ones start.
             while !go.load(Ordering::Acquire) {
                 std::hint::spin_loop();
             }
@@ -109,10 +92,6 @@ fn run_sweep(cfg: &Config, threads: usize, ops_per_thread: usize) -> SweepResult
                     let _ = cache.get(&k);
                 }
                 let ns = t0.elapsed().as_nanos() as u64;
-                // Histogram::record bounds at u64::MAX; record_correct would
-                // back-fill missed samples (coordinated-omission correction)
-                // but we're driving open-loop without a target rate, so plain
-                // record is honest.
                 let _ = hist.record(ns.max(1));
             }
             let elapsed = started.elapsed();
@@ -120,7 +99,6 @@ fn run_sweep(cfg: &Config, threads: usize, ops_per_thread: usize) -> SweepResult
         }));
     }
 
-    // Release worker threads
     go.store(true, Ordering::Release);
 
     let mut combined = Histogram::<u64>::new(3).expect("histogram");

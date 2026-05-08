@@ -11,13 +11,6 @@ use crate::policy::{Policy, bump_freq};
 use crate::tinylfu::CountMinSketch;
 
 pub(crate) type AxBuilder = BuildHasherDefault<AxHasher>;
-
-// Sentinel value for "expiry_ms" meaning "no TTL set; never expires
-// automatically." Chosen as "u32::MAX" so the comparison
-// now_ms >= expiry_ms evaluates to false without a separate branch for
-// the no-TTL case — cheap and branch-predictable on the read path.
-// Resolution is 1 ms; range is ~49.7 days from cache construction.
-
 pub(crate) const NO_EXPIRY: u32 = u32::MAX;
 
 pub(crate) struct Entry<V> {
@@ -93,7 +86,6 @@ impl<K, V> Shard<K, V> {
             return false;
         }
 
-        // TinyLFU admission gate.
         if g.map.len() >= self.capacity && g.sketch.estimate(key_hash) <= 1 {
             self.metrics.rejection();
             return true;
@@ -132,15 +124,12 @@ impl<K, V> Shard<K, V> {
         removed
     }
 
-    // Proactively sweep expired entries from policy queue fronts.
-    // Called by the background maintenance worker.
     pub(crate) fn sweep_expired(&self, now_ms: u32, budget: usize)
     where
         K: Eq + Hash + Clone,
     {
         let mut g = self.inner.write();
         let mut swept = 0;
-        // Sweep small queue front.
         while swept < budget {
             let Some(k) = g.policy.small.front() else {
                 break;
@@ -159,7 +148,6 @@ impl<K, V> Shard<K, V> {
                 _ => break,
             }
         }
-        // Sweep main queue front.
         while swept < budget {
             let Some(k) = g.policy.main.front() else {
                 break;

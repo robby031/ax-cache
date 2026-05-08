@@ -34,23 +34,16 @@ impl<K> Policy<K> {
         self.main.push_back(key);
     }
 
-    // Called when an entry is removed from the map but its key remains
-    // somewhere in the queues. Bumps the stale counter so we can trigger
-    // compaction before the queues grow without bound.
     #[inline(always)]
     pub(crate) fn mark_stale(&mut self) {
         self.stale_estimate = self.stale_estimate.saturating_add(1);
     }
 
-    // Called when a stale pop (Skip) is observed during rebalance.
     #[inline(always)]
     pub(crate) fn note_stale_popped(&mut self) {
         self.stale_estimate = self.stale_estimate.saturating_sub(1);
     }
 
-    // Drain stale entries from the front of both queues. Called
-    // when the total queue length exceeds "2 × capacity" to bound
-    // memory growth from insert/remove churn without rebalance.
     pub(crate) fn compact<V, S: core::hash::BuildHasher>(
         &mut self,
         map: &hashbrown::HashMap<K, super::shard::Entry<V>, S>,
@@ -62,7 +55,6 @@ impl<K> Policy<K> {
         if total <= threshold {
             return;
         }
-        // Drain up to `stale estimate` entries from the fronts.
         let mut budget = self.stale_estimate;
         while budget > 0 {
             if let Some(front) = self.small.front()
@@ -89,10 +81,6 @@ impl<K> Policy<K> {
 
 #[inline(always)]
 pub(crate) fn bump_freq(freq: &AtomicU8) {
-    // Relaxed store instead of CAS loop: the benign data race (two threads
-    // reading the same cur and both storing cur + 1 can lose at most
-    // one increment, but since we saturate at freq_max and eviction only
-    // checks >0, this is harmless. Avoids CAS retry storms on hot keys.
     let cur = freq.load(Ordering::Relaxed);
     if cur < FREQ_MAX {
         freq.store(cur + 1, Ordering::Relaxed);

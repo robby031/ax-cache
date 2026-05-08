@@ -1,11 +1,3 @@
-// Zipfian 95/5 read/write workload — closer to realistic cache traffic
-// than uniform single-thread micro-benches. Sweeps skew (alpha) so we can
-// see hit-ratio sensitivity, and reports throughput plus the cache's own
-// hit/miss counters at the end of each run.
-
-// Run with
-// cargo bench --bench zipfian
-
 use ax_cache::Cache;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::SeedableRng;
@@ -20,8 +12,7 @@ const WRITE_RATIO_PCT: u64 = 5;
 
 fn make_cache_prewarmed() -> Cache<u64, u64> {
     let cache: Cache<u64, u64> = Cache::with_shards(CAPACITY, SHARDS);
-    // Pre-warm with the lowest UNIVERSE keys so steady state behavior
-    // dominates the measurement.
+
     for i in 0..CAPACITY as u64 {
         cache.insert(i, i);
     }
@@ -52,9 +43,7 @@ fn bench_zipfian_mix(c: &mut Criterion) {
                     }
                 });
 
-                // Report the realized hit ratio so each tuning iteration
-                // can see whether the policy is actually working. Criterion
-                // doesn't surface this automatically; we eprintln on drop.
+
                 let m = cache.metrics();
                 let total = m.hits + m.misses;
                 if total > 0 {
@@ -68,7 +57,7 @@ fn bench_zipfian_mix(c: &mut Criterion) {
                         m.evictions,
                     );
                 }
-                let _ = &rng; // keep rng alive past the closure
+                let _ = &rng;
             },
         );
     }

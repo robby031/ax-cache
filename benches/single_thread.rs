@@ -1,6 +1,3 @@
-// Run with:
-// cargo bench --bench single_thread
-
 use ax_cache::Cache;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -52,8 +49,6 @@ fn bench_insert_new(c: &mut Criterion) {
     let mut group = c.benchmark_group("single_thread");
     group.throughput(Throughput::Elements(1));
     group.bench_function("insert_new", |b| {
-        // Capacity well above the iteration count so we measure pure insert
-        // cost without eviction noise. (Eviction is exercised by zipfian.)
         let cache: Cache<u64, u64> = Cache::with_shards(10_000_000, SHARDS);
         let mut i = 0u64;
         b.iter(|| {

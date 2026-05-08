@@ -1,6 +1,3 @@
-// Run with
-// cargo bench --bench scan_resistance
-
 use ax_cache::{Cache, MetricsSnapshot};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -20,7 +17,6 @@ fn fmt_pct(num: u64, denom: u64) -> String {
     }
 }
 
-// Scenario 1 hot+scan
 const SR_CAP: usize = 10_000;
 const SR_SHARDS: usize = 16;
 const SR_HOT_SIZE: usize = 1_000;
@@ -62,7 +58,6 @@ fn run_scan() {
     );
 }
 
-// Scenario 2 cache aside zipf
 const CA_CAP: usize = 100_000;
 const CA_SHARDS: usize = 16;
 const CA_UNIVERSE: u64 = 200_000;
@@ -86,7 +81,6 @@ fn run_cache_aside() {
     print_workload_result(&m, duration);
 }
 
-// Scenario 3 tier
 const T3_CAP: usize = 10_000;
 const T3_SHARDS: usize = 16;
 const T3_HOT_KEYS: u64 = 1_000;
