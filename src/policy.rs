@@ -44,10 +44,8 @@ impl<K> Policy<K> {
         self.stale_estimate = self.stale_estimate.saturating_sub(1);
     }
 
-    pub(crate) fn compact<V, S: core::hash::BuildHasher>(
-        &mut self,
-        map: &hashbrown::HashMap<K, super::shard::Entry<V>, S>,
-    ) where
+    pub(crate) fn compact<V>(&mut self, map: &axhash_map::HashMap<K, super::shard::Entry<V>>)
+    where
         K: Eq + core::hash::Hash,
     {
         let threshold = self.capacity.saturating_mul(2);

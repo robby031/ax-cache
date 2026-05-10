@@ -1,16 +1,14 @@
 use core::borrow::Borrow;
-use core::hash::{BuildHasherDefault, Hash};
+use core::hash::Hash;
 use core::sync::atomic::{AtomicU8, Ordering};
 
-use axhash_core::AxHasher;
-use hashbrown::HashMap;
+use axhash_map::AxHashMap;
 use parking_lot::RwLock;
 
 use crate::metrics::Metrics;
 use crate::policy::{Policy, bump_freq};
 use crate::tinylfu::CountMinSketch;
 
-pub(crate) type AxBuilder = BuildHasherDefault<AxHasher>;
 pub(crate) const NO_EXPIRY: u32 = u32::MAX;
 
 pub(crate) struct Entry<V> {
@@ -20,7 +18,7 @@ pub(crate) struct Entry<V> {
 }
 
 pub(crate) struct ShardInner<K, V> {
-    pub(crate) map: HashMap<K, Entry<V>, AxBuilder>,
+    pub(crate) map: AxHashMap<K, Entry<V>>,
     pub(crate) policy: Policy<K>,
     pub(crate) sketch: CountMinSketch,
 }
@@ -35,7 +33,7 @@ pub(crate) struct Shard<K, V> {
 impl<K, V> Shard<K, V> {
     pub(crate) fn new(capacity: usize) -> Self {
         let inner = ShardInner {
-            map: HashMap::with_capacity_and_hasher(capacity, AxBuilder::default()),
+            map: AxHashMap::with_capacity(capacity),
             policy: Policy::new(capacity),
             sketch: CountMinSketch::new(capacity),
         };
@@ -232,7 +230,7 @@ enum EvictAction {
     Skip,
 }
 
-fn decide_small<K, V>(map: &HashMap<K, Entry<V>, AxBuilder>, k: &K, now_ms: u32) -> EvictAction
+fn decide_small<K, V>(map: &AxHashMap<K, Entry<V>>, k: &K, now_ms: u32) -> EvictAction
 where
     K: Eq + Hash,
 {
@@ -252,7 +250,7 @@ where
     }
 }
 
-fn decide_main<K, V>(map: &HashMap<K, Entry<V>, AxBuilder>, k: &K, now_ms: u32) -> EvictAction
+fn decide_main<K, V>(map: &AxHashMap<K, Entry<V>>, k: &K, now_ms: u32) -> EvictAction
 where
     K: Eq + Hash,
 {

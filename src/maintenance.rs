@@ -48,7 +48,7 @@ where
     let stop_clone = Arc::clone(&stop);
 
     let thread = thread::Builder::new()
-        .name("axcache-maintenance".into())
+        .name("ax-cache-maintenance".into())
         .spawn(move || {
             while !stop_clone.load(Ordering::Relaxed) {
                 thread::sleep(config.sweep_interval);

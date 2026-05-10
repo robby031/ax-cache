@@ -4,18 +4,17 @@ mod policy;
 mod shard;
 mod tinylfu;
 
+pub use crate::maintenance::MaintenanceConfig;
+use crate::maintenance::MaintenanceHandle;
+pub use crate::metrics::MetricsSnapshot;
+use crate::shard::{NO_EXPIRY, Shard};
+
+use axhash_core::AxHasher;
 use core::borrow::Borrow;
 use core::hash::{BuildHasher, BuildHasherDefault, Hash};
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-
-use axhash_core::AxHasher;
-
-pub use crate::maintenance::MaintenanceConfig;
-use crate::maintenance::MaintenanceHandle;
-pub use crate::metrics::MetricsSnapshot;
-use crate::shard::{NO_EXPIRY, Shard};
 
 pub struct Cache<K, V> {
     shards: Arc<[Shard<K, V>]>,
@@ -79,7 +78,7 @@ where
     fn route<Q: Hash + ?Sized>(&self, key: &Q) -> (usize, u64) {
         let hasher_builder = BuildHasherDefault::<AxHasher>::default();
         let h = hasher_builder.hash_one(key);
-        let mixed = h.wrapping_mul(0x9E3779B97F4A7C15); // 2^64 / φ
+        let mixed = h.wrapping_mul(0x9E3779B97F4A7C15);
         let idx = ((mixed >> self.shard_shift) & self.mask) as usize;
         (idx, h)
     }

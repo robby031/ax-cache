@@ -1,7 +1,9 @@
 use ax_cache::Cache;
 use hdrhistogram::Histogram;
+use rand::RngExt;
+use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+
 use rand_distr::{Distribution, Zipf};
 use std::env;
 use std::sync::Arc;

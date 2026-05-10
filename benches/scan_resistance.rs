@@ -1,6 +1,7 @@
 use ax_cache::{Cache, MetricsSnapshot};
+use rand::RngExt;
+use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Zipf};
 use std::time::{Duration, Instant};
 
