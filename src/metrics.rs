@@ -1,9 +1,13 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
+#[repr(align(64))]
+#[derive(Default, Debug)]
+pub(crate) struct PaddedCounter(pub(crate) AtomicU64);
+
 #[derive(Default, Debug)]
 pub(crate) struct Metrics {
-    pub(crate) hits: AtomicU64,
-    pub(crate) misses: AtomicU64,
+    pub(crate) hits: PaddedCounter,
+    pub(crate) misses: PaddedCounter,
     pub(crate) insertions: AtomicU64,
     pub(crate) evictions: AtomicU64,
     pub(crate) rejections: AtomicU64,
@@ -12,12 +16,12 @@ pub(crate) struct Metrics {
 impl Metrics {
     #[inline(always)]
     pub(crate) fn hit(&self) {
-        self.hits.fetch_add(1, Ordering::Relaxed);
+        self.hits.0.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub(crate) fn miss(&self) {
-        self.misses.fetch_add(1, Ordering::Relaxed);
+        self.misses.0.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -37,8 +41,8 @@ impl Metrics {
 
     pub(crate) fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
-            hits: self.hits.load(Ordering::Relaxed),
-            misses: self.misses.load(Ordering::Relaxed),
+            hits: self.hits.0.load(Ordering::Relaxed),
+            misses: self.misses.0.load(Ordering::Relaxed),
             insertions: self.insertions.load(Ordering::Relaxed),
             evictions: self.evictions.load(Ordering::Relaxed),
             rejections: self.rejections.load(Ordering::Relaxed),

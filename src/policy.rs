@@ -71,15 +71,14 @@ impl<K> Policy<K> {
             }
             break;
         }
-        self.stale_estimate = self
-            .stale_estimate
-            .saturating_sub(self.stale_estimate.saturating_sub(budget));
+        self.stale_estimate = budget;
     }
 }
 
 #[inline(always)]
 pub(crate) fn bump_freq(freq: &AtomicU8) {
-    let _ = freq.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-        if cur < FREQ_MAX { Some(cur + 1) } else { None }
-    });
+    let cur = freq.load(Ordering::Relaxed);
+    if cur < FREQ_MAX {
+        let _ = freq.compare_exchange(cur, cur + 1, Ordering::Relaxed, Ordering::Relaxed);
+    }
 }

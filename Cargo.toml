@@ -11,6 +11,7 @@ categories = ["caching", "concurrency", "data-structures"]
 [dependencies]
 axhash-core = "0.8.2"
 axhash-map = "0.1.2"
+hashbrown = { version = "0.17.1", default-features = false, features = ["raw-entry", "default-hasher", "inline-more"] }
 parking_lot = "0.12.5"
 slab        = "0.4.12"
 
@@ -19,6 +20,7 @@ hdrhistogram = "7.5.4"
 rand = { version = "0.10.1", features = ["std"] }
 rand_distr   = "0.6.0"
 criterion = "0.8.2"
+moka = { version = "0.12", features = ["sync"] }
 
 [[bench]]
 name = "single_thread"
@@ -34,5 +36,21 @@ harness = false
 
 [[bench]]
 name = "scan_resistance"
+harness = false
+
+[[bench]]
+name = "head_to_head_moka_single"
+harness = false
+
+[[bench]]
+name = "head_to_head_moka_contention"
+harness = false
+
+[[bench]]
+name = "head_to_head_moka_zipfian"
+harness = false
+
+[[bench]]
+name = "soak_test"
 harness = false
 

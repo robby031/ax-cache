@@ -1,15 +1,15 @@
 use core::borrow::Borrow;
 use core::hash::Hash;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use axhash_map::AxHashMap;
+use hashbrown::hash_map::RawEntryMut;
 use parking_lot::RwLock;
 
+use crate::InsertOutcome;
 use crate::metrics::Metrics;
 use crate::policy::{Policy, bump_freq};
 use crate::tinylfu::CountMinSketch;
-
-pub(crate) const NO_EXPIRY: u32 = u32::MAX;
 
 pub(crate) struct Entry<V> {
     pub(crate) value: V,
@@ -27,6 +27,7 @@ pub(crate) struct ShardInner<K, V> {
 pub(crate) struct Shard<K, V> {
     inner: RwLock<ShardInner<K, V>>,
     capacity: usize,
+    size: AtomicUsize,
     pub(crate) metrics: Metrics,
 }
 
@@ -40,23 +41,24 @@ impl<K, V> Shard<K, V> {
         Self {
             inner: RwLock::new(inner),
             capacity,
+            size: AtomicUsize::new(0),
             metrics: Metrics::default(),
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn len(&self) -> usize {
-        self.inner.read().map.len()
+        self.size.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn get<Q>(&self, key: &Q, now_ms: u32) -> Option<V>
+    pub(crate) fn get<Q>(&self, key: &Q, hash: u64, now_ms: u32) -> Option<V>
     where
         K: Eq + Hash + Borrow<Q>,
         Q: Eq + Hash + ?Sized,
         V: Clone,
     {
         let g = self.inner.read();
-        let entry = g.map.get(key)?;
+        let (_, entry) = g.map.raw_entry().from_key_hashed_nocheck(hash, key)?;
         if now_ms >= entry.expiry_ms {
             return None;
         }
@@ -71,45 +73,94 @@ impl<K, V> Shard<K, V> {
         expiry_ms: u32,
         now_ms: u32,
         key_hash: u64,
-    ) -> bool
+    ) -> InsertOutcome
     where
         K: Eq + Hash + Clone,
     {
         let mut g = self.inner.write();
-        g.sketch.increment(key_hash);
+        let cap_full = g.map.len() >= self.capacity;
+        let ShardInner {
+            map,
+            policy,
+            sketch,
+        } = &mut *g;
 
-        if let Some(entry) = g.map.get_mut(&key) {
-            entry.value = value;
-            entry.expiry_ms = expiry_ms;
-            return false;
+        match map.raw_entry_mut().from_key_hashed_nocheck(key_hash, &key) {
+            RawEntryMut::Occupied(mut occ) => {
+                let entry = occ.get_mut();
+                entry.value = value;
+                entry.expiry_ms = expiry_ms;
+                sketch.increment(key_hash);
+                InsertOutcome::Updated
+            }
+            RawEntryMut::Vacant(vac) => {
+                let est = sketch.estimate(key_hash);
+                sketch.increment(key_hash);
+
+                if cap_full && est == 0 {
+                    self.metrics.rejection();
+                    return InsertOutcome::Rejected;
+                }
+
+                vac.insert_hashed_nocheck(
+                    key_hash,
+                    key.clone(),
+                    Entry {
+                        value,
+                        freq: AtomicU8::new(0),
+                        expiry_ms,
+                    },
+                );
+                policy.admit_small(key);
+                self.metrics.insertion();
+                let evicted = Self::rebalance(&mut g, self.capacity, now_ms);
+                if evicted > 0 {
+                    self.metrics.evictions.fetch_add(evicted, Ordering::Relaxed);
+                }
+                let new_len = g.map.len();
+                drop(g);
+                self.size.store(new_len, Ordering::Relaxed);
+                InsertOutcome::Inserted
+            }
         }
-
-        if g.map.len() >= self.capacity && g.sketch.estimate(key_hash) <= 1 {
-            self.metrics.rejection();
-            return true;
-        }
-
-        g.map.insert(
-            key.clone(),
-            Entry {
-                value,
-                freq: AtomicU8::new(0),
-                expiry_ms,
-            },
-        );
-        g.policy.admit_small(key);
-        self.metrics.insertion();
-        Self::rebalance(&mut g, self.capacity, now_ms, &self.metrics);
-        true
     }
 
-    pub(crate) fn remove<Q>(&self, key: &Q) -> Option<V>
+    pub(crate) fn contains_key<Q>(&self, key: &Q, hash: u64, now_ms: u32) -> bool
+    where
+        K: Eq + Hash + Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        let g = self.inner.read();
+        match g.map.raw_entry().from_key_hashed_nocheck(hash, key) {
+            Some((_, entry)) => now_ms < entry.expiry_ms,
+            None => false,
+        }
+    }
+
+    pub(crate) fn clear(&self)
+    where
+        K: Eq + Hash,
+    {
+        let mut g = self.inner.write();
+        g.map.clear();
+        g.policy.small.clear();
+        g.policy.main.clear();
+        g.policy.stale_estimate = 0;
+        g.sketch.reset();
+        drop(g);
+        self.size.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn remove<Q>(&self, key: &Q, hash: u64) -> Option<V>
     where
         K: Eq + Hash + Clone + Borrow<Q>,
         Q: Eq + Hash + ?Sized,
     {
         let mut g = self.inner.write();
-        let removed = g.map.remove(key).map(|e| e.value);
+        let removed = match g.map.raw_entry_mut().from_key_hashed_nocheck(hash, key) {
+            RawEntryMut::Occupied(occ) => Some(occ.remove().value),
+            RawEntryMut::Vacant(_) => None,
+        };
         if removed.is_some() {
             g.policy.mark_stale();
             let ShardInner {
@@ -118,6 +169,7 @@ impl<K, V> Shard<K, V> {
                 ..
             } = *g;
             policy.compact(map);
+            self.size.store(g.map.len(), Ordering::Relaxed);
         }
         removed
     }
@@ -164,64 +216,128 @@ impl<K, V> Shard<K, V> {
                 _ => break,
             }
         }
+        if swept > 0 {
+            self.size.store(g.map.len(), Ordering::Relaxed);
+        }
     }
 
-    fn rebalance(g: &mut ShardInner<K, V>, capacity: usize, now_ms: u32, metrics: &Metrics)
+    const POLITE_STEP_BUDGET: usize = 8;
+    const MAX_REBALANCE_STEPS: usize = 32;
+
+    fn rebalance(g: &mut ShardInner<K, V>, capacity: usize, now_ms: u32) -> u64
     where
         K: Eq + Hash,
     {
-        while g.map.len() > capacity {
-            let stepped = if !g.policy.small.is_empty() && g.policy.small.len() > g.policy.small_cap
-            {
-                step_small(g, now_ms, metrics)
+        let mut evicted = 0u64;
+        let mut steps = 0usize;
+        let mut polite_promotes = 0usize;
+
+        while g.map.len() > capacity && steps < Self::MAX_REBALANCE_STEPS {
+            let force = polite_promotes >= Self::POLITE_STEP_BUDGET;
+
+            let acted = if g.policy.small.len() > g.policy.small_cap {
+                step_small(g, now_ms, force, &mut evicted)
             } else if !g.policy.main.is_empty() {
-                step_main(g, now_ms, metrics)
+                step_main(g, now_ms, force, &mut evicted)
             } else if !g.policy.small.is_empty() {
-                step_small(g, now_ms, metrics)
+                step_small(g, now_ms, force, &mut evicted)
             } else {
-                false
+                StepResult::QueueEmpty
             };
-            if !stepped {
-                break;
+
+            match acted {
+                StepResult::QueueEmpty => break,
+                StepResult::Dropped => {
+                    // Made progress; that's enough for this insert.
+                    break;
+                }
+                StepResult::PromotedOrSkipped => {
+                    polite_promotes += 1;
+                }
             }
+            steps += 1;
         }
+        evicted
     }
 }
 
-fn step_small<K, V>(g: &mut ShardInner<K, V>, now_ms: u32, metrics: &Metrics) -> bool
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepResult {
+    QueueEmpty,
+    Dropped,
+    PromotedOrSkipped,
+}
+
+fn step_small<K, V>(
+    g: &mut ShardInner<K, V>,
+    now_ms: u32,
+    force: bool,
+    evicted: &mut u64,
+) -> StepResult
 where
     K: Eq + Hash,
 {
     let Some(k) = g.policy.small.pop_front() else {
-        return false;
+        return StepResult::QueueEmpty;
     };
-    match decide_small(&g.map, &k, now_ms) {
-        EvictAction::Promote => g.policy.admit_main(k),
+    let action = decide_small(&g.map, &k, now_ms);
+    // Under capacity pressure with no natural drop in sight, force eviction
+    // of the entry we just popped to guarantee FIFO progress.
+    let action = if force && matches!(action, EvictAction::Promote) {
+        EvictAction::Drop
+    } else {
+        action
+    };
+    match action {
+        EvictAction::Promote => {
+            g.policy.admit_main(k);
+            StepResult::PromotedOrSkipped
+        }
         EvictAction::Drop => {
             g.map.remove(&k);
-            metrics.eviction();
+            *evicted += 1;
+            StepResult::Dropped
         }
-        EvictAction::Skip => g.policy.note_stale_popped(),
+        EvictAction::Skip => {
+            g.policy.note_stale_popped();
+            StepResult::PromotedOrSkipped
+        }
     }
-    true
 }
 
-fn step_main<K, V>(g: &mut ShardInner<K, V>, now_ms: u32, metrics: &Metrics) -> bool
+fn step_main<K, V>(
+    g: &mut ShardInner<K, V>,
+    now_ms: u32,
+    force: bool,
+    evicted: &mut u64,
+) -> StepResult
 where
     K: Eq + Hash,
 {
     let Some(k) = g.policy.main.pop_front() else {
-        return false;
+        return StepResult::QueueEmpty;
     };
-    match decide_main(&g.map, &k, now_ms) {
-        EvictAction::Promote => g.policy.admit_main(k),
+    let action = decide_main(&g.map, &k, now_ms);
+    let action = if force && matches!(action, EvictAction::Promote) {
+        EvictAction::Drop
+    } else {
+        action
+    };
+    match action {
+        EvictAction::Promote => {
+            g.policy.admit_main(k);
+            StepResult::PromotedOrSkipped
+        }
         EvictAction::Drop => {
             g.map.remove(&k);
-            metrics.eviction();
+            *evicted += 1;
+            StepResult::Dropped
         }
-        EvictAction::Skip => g.policy.note_stale_popped(),
+        EvictAction::Skip => {
+            g.policy.note_stale_popped();
+            StepResult::PromotedOrSkipped
+        }
     }
-    true
 }
 
 enum EvictAction {

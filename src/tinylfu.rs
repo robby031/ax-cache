@@ -52,6 +52,11 @@ impl CountMinSketch {
         }
         self.additions = 0;
     }
+
+    pub(crate) fn reset(&mut self) {
+        self.table.fill(0);
+        self.additions = 0;
+    }
 }
 
 #[inline(always)]

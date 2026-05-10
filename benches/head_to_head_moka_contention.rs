@@ -1,9 +1,9 @@
 use ax_cache::Cache;
 use hdrhistogram::Histogram;
+use moka::sync::Cache as MokaCache;
 use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
-
 use rand_distr::{Distribution, Zipf};
 use std::env;
 use std::sync::Arc;
@@ -59,7 +59,7 @@ impl Config {
     }
 }
 
-fn run_sweep(cfg: &Config, threads: usize, ops_per_thread: usize) -> SweepResult {
+fn run_sweep_ax(cfg: &Config, threads: usize, ops_per_thread: usize) -> SweepResult {
     let cache: Arc<Cache<u64, u64>> = Arc::new(Cache::with_shards(cfg.capacity, cfg.shards));
     for i in 0..cfg.capacity as u64 {
         cache.insert(i, i);
@@ -126,7 +126,78 @@ fn run_sweep(cfg: &Config, threads: usize, ops_per_thread: usize) -> SweepResult
             }
         },
         evictions: metrics.evictions,
-        entries: cache.len(),
+    }
+}
+
+fn run_sweep_moka(cfg: &Config, threads: usize, ops_per_thread: usize) -> SweepResult {
+    let cache: Arc<MokaCache<u64, u64>> = Arc::new(MokaCache::new(cfg.capacity as u64));
+    for i in 0..cfg.capacity as u64 {
+        cache.insert(i, i);
+    }
+
+    let go = Arc::new(AtomicBool::new(false));
+    let universe = cfg.universe;
+    let alpha = cfg.zipf_alpha;
+    let write_pct = cfg.write_pct;
+    let mut handles = Vec::with_capacity(threads);
+    for tid in 0..threads {
+        let cache = Arc::clone(&cache);
+        let go = Arc::clone(&go);
+        handles.push(thread::spawn(move || {
+            let mut hist = Histogram::<u64>::new(3).expect("histogram");
+            let mut rng = SmallRng::seed_from_u64(0xC0FFEE ^ tid as u64);
+            let zipf = Zipf::new(universe as f64, alpha).expect("zipf");
+
+            while !go.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+
+            let started = Instant::now();
+            for _ in 0..ops_per_thread {
+                let k = zipf.sample(&mut rng) as u64;
+                let is_write = write_pct > 0 && rng.random_range(0u64..100) < write_pct;
+
+                let t0 = Instant::now();
+                if is_write {
+                    cache.insert(k, k);
+                } else {
+                    let _ = cache.get(&k);
+                }
+                let ns = t0.elapsed().as_nanos() as u64;
+                let _ = hist.record(ns.max(1));
+            }
+            let elapsed = started.elapsed();
+            (hist, elapsed)
+        }));
+    }
+
+    go.store(true, Ordering::Release);
+
+    let mut combined = Histogram::<u64>::new(3).expect("histogram");
+    let mut wall = Duration::ZERO;
+    for h in handles {
+        let (hist, elapsed) = h.join().expect("worker join");
+        combined.add(&hist).expect("histogram merge");
+        wall = wall.max(elapsed);
+    }
+
+    let hit_ratio = {
+        let hits = cache.entry_count();
+        let total = cfg.capacity as u64;
+        if total == 0 {
+            0.0
+        } else {
+            (hits as f64) / (total as f64)
+        }
+    };
+
+    SweepResult {
+        threads,
+        ops_per_thread,
+        wall,
+        hist: combined,
+        hit_ratio,
+        evictions: 0, // Moka doesn't expose eviction count
     }
 }
 
@@ -137,17 +208,17 @@ struct SweepResult {
     hist: Histogram<u64>,
     hit_ratio: f64,
     evictions: u64,
-    entries: usize,
 }
 
 impl SweepResult {
-    fn print(&self) {
+    fn print(&self, cache_name: &str) {
         let total_ops = self.threads as u64 * self.ops_per_thread as u64;
         let throughput_mops = (total_ops as f64) / self.wall.as_secs_f64() / 1e6;
         println!(
-            "threads={:>3}  ops/thread={:>9}  wall={:>7.2}ms  thr={:>7.2} Mops/s  \
+            "{}: threads={:>3}  ops/thread={:>9}  wall={:>7.2}ms  thr={:>7.2} Mops/s  \
              p50={:>4}ns  p90={:>5}ns  p99={:>6}ns  p999={:>7}ns  max={:>8}ns  \
-             hit_ratio={:.4}  evictions={}  entries={}",
+             hit_ratio={:.4}  evictions={}",
+            cache_name,
             self.threads,
             self.ops_per_thread,
             self.wall.as_secs_f64() * 1000.0,
@@ -159,7 +230,6 @@ impl SweepResult {
             self.hist.max(),
             self.hit_ratio,
             self.evictions,
-            self.entries,
         );
     }
 }
@@ -169,13 +239,22 @@ fn main() {
     let threads_list = parse_threads();
     let ops = parse_ops_per_thread();
     println!(
-        "ax-cache contention sweep — capacity={} universe={} shards={} write%={} zipf_alpha={}",
+        "ax-cache vs moka contention sweep — capacity={} universe={} shards={} write%={} zipf_alpha={}",
         cfg.capacity, cfg.universe, cfg.shards, cfg.write_pct, cfg.zipf_alpha,
     );
     println!("ops_per_thread={}  threads={:?}", ops, threads_list,);
     println!();
+    
+    println!("=== ax-cache ===");
     for &t in &threads_list {
-        let r = run_sweep(&cfg, t, ops);
-        r.print();
+        let r = run_sweep_ax(&cfg, t, ops);
+        r.print("ax-cache");
+    }
+    
+    println!();
+    println!("=== moka ===");
+    for &t in &threads_list {
+        let r = run_sweep_moka(&cfg, t, ops);
+        r.print("moka");
     }
 }

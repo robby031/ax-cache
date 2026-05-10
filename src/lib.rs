@@ -7,7 +7,7 @@ mod tinylfu;
 pub use crate::maintenance::MaintenanceConfig;
 use crate::maintenance::MaintenanceHandle;
 pub use crate::metrics::MetricsSnapshot;
-use crate::shard::{NO_EXPIRY, Shard};
+use crate::shard::Shard;
 
 use axhash_core::AxHasher;
 use core::borrow::Borrow;
@@ -15,6 +15,32 @@ use core::hash::{BuildHasher, BuildHasherDefault, Hash};
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+
+const NO_EXPIRY: u32 = u32::MAX;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertOutcome {
+    Inserted,
+    Updated,
+    Rejected,
+}
+
+impl InsertOutcome {
+    #[inline]
+    pub const fn is_present(self) -> bool {
+        matches!(self, Self::Inserted | Self::Updated)
+    }
+
+    #[inline]
+    pub const fn is_new(self) -> bool {
+        matches!(self, Self::Inserted)
+    }
+
+    #[inline]
+    pub const fn is_rejected(self) -> bool {
+        matches!(self, Self::Rejected)
+    }
+}
 
 pub struct Cache<K, V> {
     shards: Arc<[Shard<K, V>]>,
@@ -65,13 +91,15 @@ where
         K: Send + Sync + 'static,
         V: Send + Sync + 'static,
     {
+        if self._maintenance.get().is_some() {
+            return;
+        }
         let shards = Arc::clone(&self.shards);
         let epoch = self.epoch;
         let now_fn =
             move || -> u32 { u32::try_from(epoch.elapsed().as_millis()).unwrap_or(NO_EXPIRY - 1) };
-        let _ = self
-            ._maintenance
-            .set(maintenance::spawn_worker(shards, config, now_fn));
+        let handle = maintenance::spawn_worker(shards, config, now_fn);
+        let _ = self._maintenance.set(handle);
     }
 
     #[inline(always)]
@@ -103,10 +131,10 @@ where
         K: Borrow<Q>,
         Q: Eq + Hash + ?Sized,
     {
-        let (idx, _) = self.route(key);
+        let (idx, hash) = self.route(key);
         let shard = &self.shards[idx];
         let now = self.now_ms();
-        match shard.get(key, now) {
+        match shard.get(key, hash, now) {
             Some(v) => {
                 shard.metrics.hit();
                 Some(v)
@@ -118,12 +146,12 @@ where
         }
     }
 
-    pub fn insert(&self, key: K, value: V) -> bool {
+    pub fn insert(&self, key: K, value: V) -> InsertOutcome {
         let (idx, key_hash) = self.route(&key);
         self.shards[idx].insert(key, value, NO_EXPIRY, self.now_ms(), key_hash)
     }
 
-    pub fn insert_with_ttl(&self, key: K, value: V, ttl: Duration) -> bool {
+    pub fn insert_with_ttl(&self, key: K, value: V, ttl: Duration) -> InsertOutcome {
         if !self.has_ttl.load(Ordering::Relaxed) {
             self.has_ttl.store(true, Ordering::Relaxed);
         }
@@ -138,8 +166,23 @@ where
         K: Borrow<Q>,
         Q: Eq + Hash + ?Sized,
     {
-        let (idx, _) = self.route(key);
-        self.shards[idx].remove(key)
+        let (idx, hash) = self.route(key);
+        self.shards[idx].remove(key, hash)
+    }
+
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
+        let (idx, hash) = self.route(key);
+        self.shards[idx].contains_key(key, hash, self.now_ms())
+    }
+
+    pub fn clear(&self) {
+        for shard in self.shards.iter() {
+            shard.clear();
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -180,9 +223,61 @@ mod tests {
     #[test]
     fn update_replaces_value() {
         let c: Cache<u32, u32> = Cache::with_shards(32, 2);
-        assert!(c.insert(1, 10));
-        assert!(!c.insert(1, 20));
+        assert_eq!(c.insert(1, 10), InsertOutcome::Inserted);
+        assert_eq!(c.insert(1, 20), InsertOutcome::Updated);
         assert_eq!(c.get(&1), Some(20));
+    }
+
+    #[test]
+    fn insert_outcome_helpers() {
+        assert!(InsertOutcome::Inserted.is_present());
+        assert!(InsertOutcome::Inserted.is_new());
+        assert!(!InsertOutcome::Inserted.is_rejected());
+
+        assert!(InsertOutcome::Updated.is_present());
+        assert!(!InsertOutcome::Updated.is_new());
+        assert!(!InsertOutcome::Updated.is_rejected());
+
+        assert!(!InsertOutcome::Rejected.is_present());
+        assert!(!InsertOutcome::Rejected.is_new());
+        assert!(InsertOutcome::Rejected.is_rejected());
+    }
+
+    #[test]
+    fn contains_key_works() {
+        let c: Cache<&'static str, u32> = Cache::with_shards(64, 1);
+        assert!(!c.contains_key("missing"));
+        c.insert("present", 1);
+        assert!(c.contains_key("present"));
+        assert!(!c.contains_key("missing"));
+        c.remove("present");
+        assert!(!c.contains_key("present"));
+    }
+
+    #[test]
+    fn contains_key_respects_ttl() {
+        let c: Cache<u32, u32> = Cache::with_shards(64, 1);
+        c.insert_with_ttl(1, 100, Duration::from_millis(40));
+        assert!(c.contains_key(&1));
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(!c.contains_key(&1));
+    }
+
+    #[test]
+    fn clear_empties_cache() {
+        let c: Cache<u32, u32> = Cache::with_shards(64, 4);
+        for i in 0..32u32 {
+            c.insert(i, i);
+        }
+        assert_eq!(c.len(), 32);
+        c.clear();
+        assert_eq!(c.len(), 0);
+        assert!(c.is_empty());
+        for i in 0..32u32 {
+            assert!(c.get(&i).is_none());
+        }
+        c.insert(99, 99);
+        assert_eq!(c.get(&99), Some(99));
     }
 
     #[test]
@@ -202,6 +297,33 @@ mod tests {
         }
 
         assert!(c.len() <= 32, "expected len ≤ 32, got {}", c.len());
+    }
+
+    #[test]
+    fn capacity_holds_under_all_hot_workload() {
+        const CAP: usize = 1024;
+        let c: Cache<u64, u64> = Cache::with_shards(CAP, 8);
+
+        for i in 0..CAP as u64 {
+            c.insert(i, i);
+        }
+        for _ in 0..8 {
+            for i in 0..CAP as u64 {
+                let _ = c.get(&i);
+            }
+        }
+
+        for i in (CAP as u64)..(CAP as u64 * 100) {
+            c.insert(i, i);
+        }
+
+        let len = c.len();
+        assert!(
+            len <= CAP * 2,
+            "cache grew unboundedly under hot workload: len={} cap={}",
+            len,
+            CAP
+        );
     }
 
     #[test]
@@ -355,7 +477,7 @@ mod tests {
         for i in 0..10u32 {
             c.insert_with_ttl(i, i * 10, Duration::from_millis(30));
         }
-        assert!(c.len() > 0);
+        assert!(!c.is_empty());
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(c.len(), 0, "expected 0 after sweep, got {}", c.len());
     }
