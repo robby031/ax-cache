@@ -171,8 +171,8 @@ impl<K, V> Shard<K, V> {
         K: Eq + Hash,
     {
         while g.map.len() > capacity {
-            let prefer_small = g.policy.small.len() > g.policy.small_cap;
-            let stepped = if prefer_small && !g.policy.small.is_empty() {
+            let stepped = if !g.policy.small.is_empty() && g.policy.small.len() > g.policy.small_cap
+            {
                 step_small(g, now_ms, metrics)
             } else if !g.policy.main.is_empty() {
                 step_main(g, now_ms, metrics)
@@ -241,7 +241,7 @@ where
                 return EvictAction::Drop;
             }
             if entry.freq.load(Ordering::Relaxed) > 0 {
-                entry.freq.store(0, Ordering::Relaxed);
+                let _ = entry.freq.swap(0, Ordering::Relaxed);
                 EvictAction::Promote
             } else {
                 EvictAction::Drop

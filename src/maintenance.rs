@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -29,7 +30,12 @@ impl Drop for MaintenanceHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.thread.take() {
-            let _ = h.join();
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = h.join();
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(Duration::from_secs(5));
         }
     }
 }
