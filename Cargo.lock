@@ -68,15 +68,18 @@ dependencies = [
 
 [[package]]
 name = "axhash-core"
-version = "0.8.2"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d743043315efceb6ced46be66583ac6fc97a95225546d72f665a3ce2de6f04a5"
+checksum = "de1a185f86daeb5c2b60fe51a86f8200f64b1a158f8d96edace89ae74049b982"
+dependencies = [
+ "getrandom",
+]
 
 [[package]]
 name = "axhash-map"
-version = "0.1.2"
+version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62d02ae2efc4b4bc55abf3152574259667481d452bf7d552446ee36aa722bbd6"
+checksum = "051a8261e927187fb9e284157ac4e5ffbbbdb7fa6ff3f052cdc62e271f892c84"
 dependencies = [
  "axhash-core",
  "hashbrown 0.17.1",
