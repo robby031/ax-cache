@@ -8,10 +8,11 @@ repository = "https://github.com/robby031/ax-cache"
 description = "Hardware-aware concurrent cache engine."
 keywords = ["cache", "concurrent", "swisstable", "s3-fifo", "performance"]
 categories = ["caching", "concurrency", "data-structures"]
+readme = "README.md"
 
 [dependencies]
-axhash-core = "0.11.0"
-axhash-map = "0.1.4"
+axhash-core = "0.12.0"
+axhash-map = "0.1.5"
 hashbrown = { version = "0.17.1", default-features = false, features = ["raw-entry", "default-hasher", "inline-more"] }
 parking_lot = "0.12.5"
 slab        = "0.4.12"
