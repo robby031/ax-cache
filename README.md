@@ -5,7 +5,6 @@ Concurrent in-memory cache for Rust with admission-controlled eviction.
 - Sharded architecture
 - S3-FIFO eviction
 - TinyLFU admission filtering
-- AES-accelerated hashing via `axhash`
 - TTL support
 - Thread-safe design
 
@@ -19,10 +18,8 @@ Concurrent in-memory cache for Rust with admission-controlled eviction.
 
 ```toml
 [dependencies]
-ax-cache = "0.1"
+ax-cache = "1.0"
 ```
-
-AES support is detected automatically at runtime.
 
 ---
 
